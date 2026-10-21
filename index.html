@@ -77,7 +77,7 @@
     ['NOMER', 88, 700, 750, 1],
   ];
   // Texture units per disc radius: the texture centre sits at the disc centre.
-  const S = 0.62;
+  const S = 0.7;
 
   // --- Invisible glass ------------------------------------------------------
   // An unseen sheet of uneven glass: its thickness is a smooth, low-frequency
@@ -95,12 +95,65 @@
     edge0: 0.48,      // where the distortion starts to build toward the rim
     rim: 0.8,         // outward bend at the very rim: pulls in mirrored copies
     rimPow: 2.2,      // > 2 keeps the start of that bend imperceptible
+    parallax: 0.12,   // how much the view angle follows the pointer
   };
   // Outward image shift (disc units) at radius r: zero in the centre, growing
   // smoothly toward the rim, where the image wraps into mirrored reflections.
   function rimShift(r) {
     const b = Math.min(Math.max((r - GLASS.edge0) / (1 - GLASS.edge0), 0), 1);
     return GLASS.rim * Math.pow(b, GLASS.rimPow);
+  }
+
+  // --- Glass ball lens --------------------------------------------------------
+  // The invitation is a flat sheet behind a solid glass ball, and every pixel
+  // is a ray traced through it: refracted entering the front, again leaving the
+  // back, then on to the sheet. Near the middle the rays barely bend, so the
+  // text reads upright and a little magnified, "inside" the ball. Toward the
+  // rim they bend so hard they cross, so the same text comes back flipped,
+  // stretched and wrapped around the edge. One continuous image, no overlay,
+  // and the ball itself is never drawn. Open the page with ?tune for sliders.
+  const LENS = {
+    strength: 1.0,      // refraction strength (glass index 1 + 0.25 × strength)
+    edge: 1.0,          // edge distortion: 1 = physical, more = exaggerated rim
+    magnification: 1.9, // center magnification (sets how far behind the sheet is)
+    radius: 1.0,        // lens radius, in ball radii
+    softness: 0.04,     // transition softness at the lens edge
+    anisotropy: 0.15,   // how uneven the bend is around the circle
+  };
+
+  function refract3(I, N, eta) {
+    const d = I[0] * N[0] + I[1] * N[1] + I[2] * N[2];
+    const k = 1 - eta * eta * (1 - d * d);
+    if (k < 0) return null;
+    const f = eta * d + Math.sqrt(k);
+    return [eta * I[0] - f * N[0], eta * I[1] - f * N[1], eta * I[2] - f * N[2]];
+  }
+  // Where a straight-on ray entering the unit ball at (x, 0) lands on the sheet
+  // at z = -depth. Mirrors the shader's trace().
+  function ballTrace(x, ior, depth) {
+    const P1 = [x, 0, Math.sqrt(Math.max(1 - x * x, 0))];
+    const T1 = refract3([0, 0, -1], P1, 1 / ior);
+    const t = -2 * (P1[0] * T1[0] + P1[1] * T1[1] + P1[2] * T1[2]);
+    const s1 = (-depth - P1[2]) / T1[2];
+    if (s1 <= t) return P1[0] + s1 * T1[0];
+    const P2 = [P1[0] + t * T1[0], P1[1] + t * T1[1], P1[2] + t * T1[2]];
+    const T2 = refract3(T1, [-P2[0], -P2[1], -P2[2]], ior);
+    const s2 = (-depth - P2[2]) / T2[2];
+    return P2[0] + s2 * T2[0];
+  }
+  // Sheet depth that gives the wanted centre magnification for this glass.
+  function solveDepth(ior, mag) {
+    // Apparent magnification: screen distance over the sheet distance it shows.
+    const m = d => 1e-3 / ballTrace(1e-3, ior, d);
+    const focal = ior / (2 * (ior - 1));
+    let lo = 0, hi = focal - 0.02;
+    if (mag <= m(lo)) return { depth: lo, mag: m(lo) };
+    if (mag >= m(hi)) return { depth: hi, mag: m(hi) };
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (m(mid) < mag) lo = mid; else hi = mid;
+    }
+    return { depth: lo, mag: m(lo) };
   }
 
   // --- Input + motion (shared by both renderers) --------------------------
@@ -196,6 +249,29 @@
     requestAnimationFrame(frame);
   }
 
+  // ?tune: sliders for the lens, values shown so they can be copied into LENS.
+  if (params.has('tune')) {
+    const ranges = {
+      strength: [0.2, 2.5, 0.01], edge: [0, 2, 0.01], magnification: [1, 4, 0.01],
+      radius: [0.3, 1, 0.01], softness: [0.005, 0.5, 0.005], anisotropy: [0, 0.8, 0.01],
+    };
+    const box = document.createElement('div');
+    box.style.cssText = 'position:fixed;left:12px;bottom:12px;padding:10px 12px;background:#fff;' +
+      'border:1px solid #000;font:12px/1.6 ' + FONT + ';color:#000;z-index:9;touch-action:auto';
+    for (const [key, [min, max, step]] of Object.entries(ranges)) {
+      const row = document.createElement('label');
+      row.style.cssText = 'display:grid;grid-template-columns:96px 140px 40px;gap:8px;align-items:center';
+      const input = Object.assign(document.createElement('input'), { type: 'range', min, max, step, value: LENS[key] });
+      const out = document.createElement('span');
+      out.textContent = LENS[key];
+      input.addEventListener('input', () => { LENS[key] = +input.value; out.textContent = input.value; });
+      input.addEventListener('pointermove', e => e.stopPropagation());
+      row.append(key, input, out);
+      box.append(row);
+    }
+    document.body.append(box);
+  }
+
   // --- WebGL renderer ------------------------------------------------------
   function webglRenderer() {
     const tex = document.createElement('canvas');
@@ -224,52 +300,39 @@
       precision highp float;
       varying vec2 uv;
       uniform sampler2D tex;
-      uniform vec2 flow;    // slow drift of the thickness field (a point on a circle)
-      uniform vec2 cursor;  // centre of the pointer swell, disc units
-      uniform float swell;  // its strength
-      uniform vec2 off;     // parallax of the invitation
-      uniform float px;     // one pixel in disc-radius units
+      uniform vec2 tilt;     // viewing angle, from the pointer
+      uniform float ior;     // glass index
+      uniform float depth;   // sheet distance behind the ball centre
+      uniform float mag;     // the resulting centre magnification
+      uniform float lEdge, lRadius, lSoft, lAniso, lTurn;
+      uniform vec2 lCenter;
+      uniform float px;      // one pixel in disc-radius units
 
       const float S = ${S.toFixed(3)};
-      const float FREQ = ${GLASS.freq.toFixed(3)};
-      const float AMOUNT = ${GLASS.amount.toFixed(3)};
-      const float CSIZE = ${GLASS.cursorSize.toFixed(3)};
-      const float STRENGTH = ${GLASS.strength.toFixed(3)};
-      const float CHROMA = ${GLASS.chroma.toFixed(3)};
-      const float CALM = ${GLASS.calm.toFixed(3)};
-      const float EDGE0 = ${GLASS.edge0.toFixed(3)};
-      const float RIM = ${GLASS.rim.toFixed(3)};
-      const float RIMPOW = ${GLASS.rimPow.toFixed(3)};
+      const float CHROMA = ${(GLASS.chroma * 0.15).toFixed(4)};
+      const vec3 RED = vec3(${RED.map(c => c.toFixed(4)).join(', ')});
 
-      // Smooth gradient noise with a quintic fade: continuous slopes everywhere.
-      vec2 hash2(vec2 p) {
-        p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-        return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
-      }
-      float noise(vec2 p) {
-        vec2 i = floor(p), f = fract(p);
-        vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-        return mix(
-          mix(dot(hash2(i), f), dot(hash2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
-          mix(dot(hash2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)),
-              dot(hash2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x),
-          u.y);
+      // Ray through the unit ball: enters at (q, z) on the front, refracts,
+      // either meets the sheet inside (shallow sheet) or leaves through the
+      // back, refracts again and travels on to the sheet at z = -depth.
+      vec2 trace(vec2 q, vec3 I, float n) {
+        float nz = sqrt(max(1.0 - dot(q, q), 0.0));
+        vec3 P1 = vec3(q, nz);
+        vec3 T1 = refract(I, P1, 1.0 / n);
+        float t = -2.0 * dot(P1, T1);
+        float s1 = (-depth - P1.z) / min(T1.z, -1e-4);
+        if (s1 <= t) return (P1 + s1 * T1).xy;
+        vec3 P2 = P1 + t * T1;
+        vec3 T2 = refract(T1, -P2, n);
+        if (dot(T2, T2) < 1e-6) T2 = reflect(T1, -P2);
+        float s2 = (-depth - P2.z) / min(T2.z, -1e-4);
+        return (P2 + s2 * T2).xy;
       }
 
-      // Glass thickness. Two drifting octaves of noise, gated by a broader noise
-      // so whole regions stay flat (undistorted) and others swell, plus a soft,
-      // irregular swell that trails the pointer.
-      float thickness(vec2 p) {
-        vec2 a = p * FREQ + flow;
-        float f = noise(a) + 0.45 * noise(a * 2.07 + vec2(3.1, -1.7) - flow * 0.6);
-        float gate = smoothstep(-0.25, 0.35, noise(p * 0.72 + vec2(5.2, 1.3) + flow.yx * 0.5));
-        vec2 dc = p - cursor;
-        float b = exp(-dot(dc, dc) / CSIZE) * (0.75 + 0.5 * noise(p * 2.3 - flow));
-        return AMOUNT * gate * f + swell * b;
-      }
-
-      vec4 sampleAt(vec2 p) {
-        return texture2D(tex, vec2(0.5 + p.x * S, 0.5 - p.y * S));
+      float inkOnSheet(vec2 h) {
+        vec2 st = vec2(0.5 + h.x * S, 0.5 - h.y * S);
+        if (any(lessThan(st, vec2(0.0))) || any(greaterThan(st, vec2(1.0)))) return 0.0;
+        return clamp(1.0 - texture2D(tex, st).r / RED.r, 0.0, 1.0);
       }
 
       void main() {
@@ -278,31 +341,35 @@
         float alpha = 1.0 - smoothstep(1.0 - 1.5 * px, 1.0, r);
         if (alpha <= 0.0) { gl_FragColor = vec4(0.0); return; }
 
-        // The centre stays almost still so the invitation reads clearly; the
-        // distortion builds smoothly toward the rim.
-        float edge = smoothstep(EDGE0, 0.9, r);
-        float w = mix(CALM, 1.0, edge);
+        vec3 I = normalize(vec3(tilt, -1.0));
+        vec2 ql = (q - lCenter) / lRadius;   // in lens radii
+        float rl = length(ql);
 
-        // The image moves along the thickness slope: swells magnify, thin
-        // spots shrink, slopes bend straight strokes into waves.
-        float e = 0.01;
-        float h = thickness(q);
-        vec2 grad = vec2(thickness(q + vec2(e, 0.0)) - h, thickness(q + vec2(0.0, e)) - h) / e;
-        vec2 d = grad * STRENGTH * w * (1.0 + 2.2 * edge);
+        vec3 ink;
+        if (rl >= 1.0) {
+          ink = vec3(inkOnSheet(q));
+        } else {
+          // The paraxial (ideal-magnifier) image, and the real trace: their
+          // difference is the lens's own distortion, which edge and
+          // anisotropy scale. Divide by mag so the centre keeps its size.
+          vec2 c0 = trace(vec2(0.0), I, ior);
+          float th = atan(ql.y, ql.x) + lTurn;
+          float A = 1.0 + lAniso * (0.6 * cos(2.0 * th + 0.7) + 0.4 * cos(3.0 * th - 1.2));
+          float w = 1.0 - smoothstep(1.0 - lSoft, 1.0, rl);
+          vec2 par = c0 + ql / mag;
+          for (int c = 0; c < 3; c++) {
+            float n = ior * (1.0 + CHROMA * (float(c) - 1.0));
+            vec2 h = trace(ql, I, n);
+            h = par + (h - par) * lEdge * A * w;
+            vec2 screen = lCenter + h * mag * lRadius;
+            float k = inkOnSheet(screen);
+            if (c == 0) ink.r = k; else if (c == 1) ink.g = k; else ink.b = k;
+          }
+        }
 
-        // Toward the rim the view bends outward past the invitation's edge and
-        // comes back mirrored: reflections that the noise above keeps wavy.
-        float b = clamp((r - EDGE0) / (1.0 - EDGE0), 0.0, 1.0);
-        d += q / max(r, 1e-4) * RIM * pow(b, RIMPOW);
-
-        // Red and blue part ways a little, only where the bend is strong.
-        float ca = CHROMA * smoothstep(0.04, 0.3, length(d));
-        vec2 p = q + off;
-        vec3 col;
-        col.r = sampleAt(p + d * (1.0 + ca)).r;
-        col.g = sampleAt(p + d).g;
-        col.b = sampleAt(p + d * (1.0 - ca)).b;
-
+        vec3 col = RED * (1.0 - ink);
+        // The red body falls off a touch toward its limb, like a lit ball.
+        col *= 1.0 - 0.1 * pow(r, 3.0);
         gl_FragColor = vec4(col, alpha);
       }
     `;
@@ -343,7 +410,8 @@
     if (document.fonts) document.fonts.ready.then(uploadTexture);
 
     const U = {};
-    for (const name of ['flow', 'cursor', 'swell', 'off', 'px']) U[name] = gl.getUniformLocation(prog, name);
+    for (const name of ['tilt', 'ior', 'depth', 'mag', 'lEdge', 'lRadius', 'lSoft', 'lAniso',
+      'lTurn', 'lCenter', 'px']) U[name] = gl.getUniformLocation(prog, name);
 
     function resize() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -357,14 +425,23 @@
     window.addEventListener('resize', resize);
     resize();
 
-    return (x, y, vx, vy, phase) => {
-      // The field drifts on a circle (seamless for the GIF loop) and leans
-      // with the pointer; the swell follows the pointer and grows with speed.
-      const R = 1.6;
-      gl.uniform2f(U.flow, Math.cos(phase) * R + x * 0.35, Math.sin(phase) * R - y * 0.35);
-      gl.uniform2f(U.cursor, x * 0.85, -y * 0.85);
-      gl.uniform1f(U.swell, GLASS.cursor + Math.min(Math.hypot(vx, vy) * 0.06, 0.1));
-      gl.uniform2f(U.off, -x * 0.04, y * 0.03);
+    let solved = null, solvedKey = '';
+    return (x, y) => {
+      const ior = 1 + 0.25 * Math.max(LENS.strength, 0.01);
+      const key = ior + '|' + LENS.magnification;
+      if (key !== solvedKey) { solved = solveDepth(ior, LENS.magnification); solvedKey = key; }
+      // Looking at the ball from the pointer's side: the text slides and
+      // bends inside it, the flipped rim copies swing the other way.
+      gl.uniform2f(U.tilt, x * GLASS.parallax, -y * GLASS.parallax);
+      gl.uniform1f(U.ior, ior);
+      gl.uniform1f(U.depth, solved.depth);
+      gl.uniform1f(U.mag, solved.mag);
+      gl.uniform1f(U.lEdge, LENS.edge);
+      gl.uniform1f(U.lRadius, Math.max(LENS.radius, 0.05));
+      gl.uniform1f(U.lSoft, Math.max(LENS.softness, 0.005));
+      gl.uniform1f(U.lAniso, LENS.anisotropy);
+      gl.uniform1f(U.lTurn, x * 0.35);
+      gl.uniform2f(U.lCenter, 0, 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     };
   }
