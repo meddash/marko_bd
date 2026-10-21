@@ -65,7 +65,7 @@
   const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 
   // --- Text texture -------------------------------------------------------
-  // The invitation is drawn flat onto a square canvas, then wrapped onto a sphere.
+  // The invitation is drawn flat onto a square canvas, then sampled by the lens shader.
   const TEX = 1024;
   const tex = document.createElement('canvas');
   tex.width = tex.height = TEX;
@@ -100,53 +100,60 @@
     varying vec2 uv;
     void main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }
   `;
-  // Orthographic view of a rotating sphere: each pixel is mapped back to a point
-  // on the sphere, un-rotated, then turned into lon/lat to sample the text.
+  // Text sealed inside a mirrored glass ball:
+  //  - the core shows the invitation flat, slightly magnified like through glass;
+  //  - toward the rim the inside surface reflects it: polar-mapped, mirrored,
+  //    wrapped around the circumference and smeared along it.
   const fs = `
     precision highp float;
     varying vec2 uv;
     uniform sampler2D tex;
-    uniform vec2 rot;     // yaw, pitch
-    uniform float roll;
-    uniform vec2 blur;    // motion smear direction (screen space)
+    uniform vec2 off;     // parallax of the inner text
+    uniform float phi;    // rotation of the reflections around the rim
+    uniform vec2 blur;    // motion smear of the inner text
+    uniform float spread; // angular smear of the reflections
     uniform vec3 red;
 
-    const float PI = 3.14159265;
-    const float SPAN = 0.72; // how much of the sphere the text covers
+    const float S = 0.6;  // texture units per ball radius
 
-    vec3 rotate(vec3 v) {
-      float cy = cos(rot.x), sy = sin(rot.x);
-      float cp = cos(rot.y), sp = sin(rot.y);
-      float cr = cos(roll),  sr = sin(roll);
-      v.xy = mat2(cr, -sr, sr, cr) * v.xy;
-      v.yz = mat2(cp, -sp, sp, cp) * v.yz;
-      v.xz = mat2(cy, -sy, sy, cy) * v.xz;
-      return v;
-    }
-
-    float ink(vec2 q) {
-      float r2 = dot(q, q);
-      if (r2 > 1.0) return 0.0;
-      vec3 v = rotate(vec3(q.x, q.y, sqrt(1.0 - r2)));
-      float lon = atan(v.x, v.z);
-      float lat = asin(clamp(v.y, -1.0, 1.0));
-      vec2 st = vec2(0.5 + lon / (SPAN * PI), 0.5 - lat / (SPAN * PI));
-      if (st.x < 0.0 || st.x > 1.0 || st.y < 0.0 || st.y > 1.0) return 0.0;
-      vec4 c = texture2D(tex, st);
-      return clamp(1.0 - c.r / red.r, 0.0, 1.0); // red ≈ 0, black ≈ 1
+    float ink(vec2 p) {
+      vec4 c = texture2D(tex, vec2(0.5 + p.x * S, 0.5 - p.y * S));
+      return clamp(1.0 - c.r / red.r, 0.0, 1.0);
     }
 
     void main() {
       vec2 q = uv;
-      if (dot(q, q) > 1.0) { gl_FragColor = vec4(red, 0.0); return; }
-      // A few taps along the motion direction give the smeary look of the gif.
+      float r = length(q);
+      if (r > 1.0) { gl_FragColor = vec4(red, 0.0); return; }
+
+      // Inner text: gentle fisheye, magnified in the middle.
+      vec2 m = q * (0.84 + 0.32 * r * r) + off;
       float a = 0.0;
-      for (int i = 0; i < 7; i++) {
-        float k = float(i) / 6.0 - 0.5;
-        a += ink(q + blur * k);
+      for (int i = 0; i < 5; i++) {
+        float k = float(i) / 4.0 - 0.5;
+        a += ink(m + blur * k);
       }
-      a /= 7.0;
-      gl_FragColor = vec4(mix(red, vec3(0.0), clamp(a, 0.0, 1.0)), 1.0);
+      a /= 5.0;
+      float wm = 1.0 - smoothstep(0.66, 0.84, r);
+
+      // Reflection: the closer to the rim, the deeper into the text it looks,
+      // so the same lines curl around the edge, mirrored.
+      float t = clamp((r - 0.66) / 0.34, 0.0, 1.0);
+      float rr = mix(0.5, 0.16, t);
+      float ang = atan(q.y, q.x) + phi;
+      float b = 0.0;
+      for (int j = 0; j < 7; j++) {
+        float aj = ang + (float(j) / 6.0 - 0.5) * spread;
+        vec2 d = vec2(-cos(aj), sin(aj)) * rr - off * 1.6;
+        b += ink(d);
+      }
+      b /= 7.0;
+      float wr = smoothstep(0.66, 0.86, r) * 0.88;
+
+      float v = max(a * wm, b * wr);
+      vec3 col = mix(red, vec3(0.0), v);
+      col *= 1.0 - 0.14 * smoothstep(0.82, 1.0, r); // darker glass edge
+      gl_FragColor = vec4(col, 1.0);
     }
   `;
 
@@ -179,16 +186,17 @@
     gl.generateMipmap(gl.TEXTURE_2D);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
   }
   uploadTexture();
   if (document.fonts) document.fonts.ready.then(uploadTexture);
 
   const U = {
-    rot: gl.getUniformLocation(prog, 'rot'),
-    roll: gl.getUniformLocation(prog, 'roll'),
+    off: gl.getUniformLocation(prog, 'off'),
+    phi: gl.getUniformLocation(prog, 'phi'),
     blur: gl.getUniformLocation(prog, 'blur'),
+    spread: gl.getUniformLocation(prog, 'spread'),
     red: gl.getUniformLocation(prog, 'red'),
   };
   gl.uniform3fv(U.red, RED);
@@ -243,9 +251,13 @@
   // --- Animation ----------------------------------------------------------
   const ball = document.getElementById('ball');
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const s = { x: 0, y: 0, vx: 0, vy: 0, px: 0, py: 0 };
+  // Two chained exponential smoothers: no overshoot, no jitter.
+  const s = { ax: 0, ay: 0, x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0 };
+  let prev = performance.now();
 
   function frame(now) {
+    const dt = Math.min((now - prev) / 1000, 0.05);
+    prev = now;
     // Without input for a while the ball idles in a lazy figure-eight.
     let tx = target.x, ty = target.y;
     if (now - lastInput > 2500 && !reduce) {
@@ -254,27 +266,35 @@
       ty = Math.sin(k * 1.1) * 0.35;
     }
 
-    // Springy follow: overshoots a little, like the gif's wobble.
-    const stiff = reduce ? 0.04 : 0.06, damp = 0.82;
-    s.vx = (s.vx + (tx - s.x) * stiff) * damp;
-    s.vy = (s.vy + (ty - s.y) * stiff) * damp;
-    s.x += s.vx;
-    s.y += s.vy;
+    const k = 1 - Math.exp(-dt * (reduce ? 1.5 : 2.6));
+    s.ax += (tx - s.ax) * k;
+    s.ay += (ty - s.ay) * k;
+    s.x += (s.ax - s.x) * k;
+    s.y += (s.ay - s.y) * k;
 
-    const yaw = -s.x * 0.9;
-    const pitch = -s.y * 0.7;
-    const roll = s.vx * -1.5;
-    const vx = s.x - s.px, vy = s.y - s.py;
+    // Per-frame velocity, itself smoothed so blur and tilt don't flicker.
+    const kv = 1 - Math.exp(-dt * 6);
+    // Speed in units per second, so the look doesn't depend on frame rate.
+    s.vx += ((s.x - s.px) / Math.max(dt, 1e-3) - s.vx) * kv;
+    s.vy += ((s.y - s.py) / Math.max(dt, 1e-3) - s.vy) * kv;
     s.px = s.x; s.py = s.y;
+    const vx = s.vx, vy = s.vy;
+
 
     // The disc itself drifts toward the pointer and tilts slightly with speed.
     const travel = Math.min(window.innerWidth, window.innerHeight) * 0.06;
     ball.style.transform =
-      `translate(${s.x * travel}px, ${s.y * travel}px) rotate(${s.vx * 40}deg)`;
+      `translate(${s.x * travel}px, ${s.y * travel}px)`;
 
-    gl.uniform2f(U.rot, yaw, pitch);
-    gl.uniform1f(U.roll, roll);
-    gl.uniform2f(U.blur, reduce ? 0 : -vx * 4, reduce ? 0 : vy * 4);
+    gl.uniform2f(U.off, -s.x * 0.12, s.y * 0.1);
+    gl.uniform1f(U.phi, s.x * 0.9 + s.y * 0.45);
+    const speed = Math.hypot(vx, vy);
+    gl.uniform1f(U.spread, reduce ? 0.04 : Math.min(0.06 + speed * 0.12, 0.35));
+    // Cap the smear so fast jumps stay readable.
+    let bx = -vx * 0.06, by = vy * 0.06;
+    const bl = Math.hypot(bx, by), maxBlur = 0.03;
+    if (bl > maxBlur) { bx *= maxBlur / bl; by *= maxBlur / bl; }
+    gl.uniform2f(U.blur, reduce ? 0 : bx, reduce ? 0 : by);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     requestAnimationFrame(frame);
   }
