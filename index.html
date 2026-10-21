@@ -81,6 +81,14 @@
             >beautifully bizarre</a
           >
         </p>
+        <p>
+          <a
+            href="https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/"
+            target="_blank"
+            rel="noopener"
+            >dc: surrealist cocktail — коктейльный образ + одна weird detail.
+          </a>
+        </p>
         <p><a id="cal-link">sat, dec 05 · 19:00</a></p>
         <p>
           <a
@@ -140,19 +148,24 @@
         // The invitation in texture pixels (TEX × TEX): text, size, weight, y,
         // letter spacing, and an optional link.
         const TEX = 1024;
+        const PINTEREST =
+          "https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/";
         const LINES = [
-          ["maria turns 30", 118, 700, 270, -3],
-          ["THEME OF THE NIGHT", 40, 400, 410, 4],
+          ["maria turns 30", 118, 700, 230, -3],
+          ["THEME OF THE NIGHT", 40, 400, 360, 4],
+          ["beautifully bizarre", 92, 700, 435, -2, PINTEREST],
+          // Dress code: a small label line, then the brief in one quiet line.
+          ["dc: surrealist cocktail", 46, 700, 538, -0.5, PINTEREST],
           [
-            "beautifully bizarre",
-            92,
-            700,
-            490,
-            -2,
-            "https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/",
+            "коктейльный образ + одна weird detail.",
+            30,
+            400,
+            590,
+            0.2,
+            PINTEREST,
           ],
-          ["sat, dec 05 · 19:00", 64, 400, 640, 0, ICS_URL],
-          ["NOMER", 88, 700, 750, 1, "https://yandex.ru/maps/-/CXR7QBIn"],
+          ["sat, dec 05 · 19:00", 64, 400, 685, 0, ICS_URL],
+          ["NOMER", 88, 700, 785, 1, "https://yandex.ru/maps/-/CXR7QBIn"],
         ];
         // Clickable boxes of the linked lines, in texture pixels (filled when drawn).
         const LINKS = [];
