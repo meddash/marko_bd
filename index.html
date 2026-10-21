@@ -476,6 +476,13 @@
       // the sphere there and the sheet is read back in real pixels.
       uniform vec2 halfPx;   // screen half-size, px
       uniform float unit;    // px per text-layout unit
+      // Motion damage, like type filmed through reeded glass on a cheap
+      // camera: vertical slices slip out of line, the image smears along the
+      // motion and grain creeps into the soft edges. All of it scales with
+      // how fast the view is moving and settles back to clean at rest.
+      uniform float shake;   // 0 at rest … 1 at a fast swipe
+      uniform vec2 smear;    // motion direction × length, px
+      uniform float time;
 
       const float S = ${S.toFixed(3)};
       const float CHROMA = ${(GLASS.chroma * 0.5).toFixed(4)};
@@ -505,6 +512,37 @@
         return clamp(1.0 - texture2D(tex, st).r / RED.r, 0.0, 1.0);
       }
 
+      float hash1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+      float hash2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+      // Where a screen column's slice of the image has slipped to, in px.
+      vec2 sliceShift(vec2 P) {
+        if (shake <= 0.001) return vec2(0.0);
+        // Uneven column widths: cut a coarse grid, then split some cells.
+        float w = unit * 0.16;
+        float col = floor(P.x / w);
+        if (hash1(col + 3.1) > 0.55) col = floor(P.x / (w * 0.45)) + 1000.0;
+        // Slices re-shuffle a few times a second while moving.
+        float tick = floor(time * 7.0);
+        float h = hash1(col + tick * 17.0);
+        float moves = step(0.6, hash1(col * 1.7 + tick * 3.0));
+        return vec2((h - 0.5) * 2.0 * unit * 0.1, (hash1(col + 9.0 + tick) - 0.5) * unit * 0.025)
+          * moves * shake;
+      }
+
+      // The ink at a sheet point, smeared along the motion.
+      float smearedInk(vec2 px) {
+        if (shake <= 0.001) return inkOnSheet(px);
+        // Taps dithered per pixel, so the smear reads as a blur, not copies.
+        float j = hash2(gl_FragCoord.xy) / 8.0;
+        float a = 0.0;
+        for (int i = 0; i < 8; i++) {
+          float t = float(i) / 8.0 + j - 0.5;
+          a += inkOnSheet(px + smear * t);
+        }
+        return a / 8.0;
+      }
+
       void main() {
         vec2 P = uv * halfPx;                    // pixel offset from centre
         float minA = min(halfPx.x, halfPx.y);
@@ -530,10 +568,16 @@
         // Colour split scales only the lens's own distortion, so the
         // readable middle stays clean and the fringes grow toward the edges.
         vec2 dev = (trace(q, I, ior) - par) * lEdge * A;
+        vec2 slip = sliceShift(P);
         vec3 ink;
-        ink.r = inkOnSheet((par + dev * (1.0 + CHROMA)) * mag * k);
-        ink.g = inkOnSheet((par + dev) * mag * k);
-        ink.b = inkOnSheet((par + dev * (1.0 - CHROMA)) * mag * k);
+        ink.r = smearedInk((par + dev * (1.0 + CHROMA)) * mag * k + slip);
+        ink.g = smearedInk((par + dev) * mag * k + slip);
+        ink.b = smearedInk((par + dev * (1.0 - CHROMA)) * mag * k + slip);
+
+        // Grain: speckle the half-tones (soft edges), stronger in motion.
+        float g = hash2(floor(gl_FragCoord.xy) + fract(time * 13.0) * 91.0) - 0.5;
+        float soft = 1.0 - abs(2.0 * ink.g - 1.0);
+        ink = clamp(ink + g * (0.08 + 0.25 * shake) * soft, 0.0, 1.0);
 
         // At the very edge the rim squeezes text into hairlines that would run
         // along the whole screen like a frame; let them fade into the red.
@@ -541,6 +585,7 @@
         vec3 col = RED * (1.0 - ink);
         // A faint falloff toward the edges, as at a ball's limb.
         col *= 1.0 - 0.08 * pow(min(u, 1.0), 3.0);
+        col += g * 0.025; // a whisper of grain on the red, too
         gl_FragColor = vec4(col, 1.0);
       }
     `;
@@ -616,6 +661,9 @@
             "rimPow",
             "halfPx",
             "unit",
+            "shake",
+            "smear",
+            "time",
           ])
             U[name] = gl.getUniformLocation(prog, name);
 
@@ -731,9 +779,20 @@
             );
           }
 
-          const draw = (x, y) => {
+          let shake = 0;
+          const draw = (x, y, vx = 0, vy = 0) => {
             view.x = x;
             view.y = y;
+            // Motion damage follows pointer speed, eased so it swells and
+            // settles instead of flickering on and off.
+            const speed = Math.hypot(vx, vy);
+            const want = reduce ? 0 : Math.min(Math.max(speed - 0.12, 0) * 0.5, 0.7);
+            shake += (want - shake) * (want > shake ? 0.25 : 0.06);
+            const unitPx = 0.44 * Math.min(canvas.clientWidth, canvas.clientHeight);
+            const len = Math.max(speed, 1e-4);
+            gl.uniform1f(U.shake, shake);
+            gl.uniform2f(U.smear, (vx / len) * shake * unitPx * 0.05, (-vy / len) * shake * unitPx * 0.05);
+            gl.uniform1f(U.time, performance.now() / 1000);
             const ior = solveLens();
             // Looking at the ball from the pointer's side: the text slides and
             // bends inside it, the flipped rim copies swing the other way.
