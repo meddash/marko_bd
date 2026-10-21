@@ -1,295 +1,411 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>maria turns 30</title>
-<meta name="description" content="maria turns 30 — beautifully bizarre. sat, dec 05 · 19:00 · NOMER">
-<meta name="theme-color" content="#e8191c">
-<style>
-  :root {
-    --red: #e8191c;
-    --ink: #000;
-    --bg: #e8191c;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body {
-    height: 100%;
-    background: var(--bg);
-    overflow: hidden;
-    overscroll-behavior: none;
-    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-  }
-  body {
-    display: grid;
-    place-items: center;
-    touch-action: none;
-    cursor: default;
-  }
-  /* The sphere is stretched edge to edge: an ellipse inscribed in the viewport. */
-  .ball {
-    position: fixed;
-    inset: 0;
-  }
-  canvas, svg {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-  svg { display: none; }
-  .sr-only {
-    position: absolute;
-    width: 1px; height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
-</style>
-</head>
-<body>
-  <main class="ball" id="ball">
-    <canvas id="gl" aria-hidden="true"></canvas>
-    <svg id="svg" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid slice" aria-hidden="true"></svg>
-    <div class="sr-only">
-      <h1>maria turns 30</h1>
-      <p>theme of the night: beautifully bizarre</p>
-      <p>sat, dec 05 · 19:00</p>
-      <p>NOMER</p>
-    </div>
-  </main>
-
-<script>
-(() => {
-  const RED = [232 / 255, 25 / 255, 28 / 255];
-  const RED_CSS = `rgb(${RED.map(c => Math.round(c * 255)).join(',')})`;
-  const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
-  const params = new URLSearchParams(location.search);
-
-  // The invitation in texture pixels (TEX × TEX): text, size, weight, y, letter spacing.
-  const TEX = 1024;
-  const LINES = [
-    ['maria turns 30', 118, 700, 270, -3],
-    ['THEME OF THE NIGHT', 40, 400, 410, 4],
-    ['beautifully bizarre', 92, 700, 490, -2],
-    ['sat, dec 05 · 19:00', 64, 400, 640, 0],
-    ['NOMER', 88, 700, 750, 1],
-  ];
-  // Texture units per disc radius: the texture centre sits at the disc centre.
-  const S = 0.7;
-
-  // --- Invisible glass ------------------------------------------------------
-  // An unseen sheet of uneven glass: its thickness is a smooth, low-frequency
-  // noise field, and the image is shifted along the thickness gradient, the way
-  // light bends through it. Nothing of the glass itself is drawn.
-  const GLASS = {
-    freq: 1.1,        // size of the thickness swells (lower = broader)
-    amount: 0.42,     // thickness of the drifting field
-    cursor: 0.22,     // extra swell that follows the pointer
-    cursorSize: 0.32, // its spread (radius² in disc units)
-    strength: 0.15,   // how far a thickness slope shifts the image
-    chroma: 0.07,     // RGB split, only where refraction is strong
-    drift: 0.05,      // how fast the field slowly flows on its own (rad/s)
-    calm: 0.1,        // share of the distortion left in the readable centre
-    edge0: 0.48,      // where the distortion starts to build toward the rim
-    rim: 0.8,         // outward bend at the very rim: pulls in mirrored copies
-    rimPow: 2.2,      // > 2 keeps the start of that bend imperceptible
-    parallax: 0.12,   // how much the view angle follows the pointer
-  };
-  // Outward image shift (disc units) at radius r: zero in the centre, growing
-  // smoothly toward the rim, where the image wraps into mirrored reflections.
-  function rimShift(r) {
-    const b = Math.min(Math.max((r - GLASS.edge0) / (1 - GLASS.edge0), 0), 1);
-    return GLASS.rim * Math.pow(b, GLASS.rimPow);
-  }
-
-  // --- Glass ball lens --------------------------------------------------------
-  // The invitation is a flat sheet behind a solid glass ball, and every pixel
-  // is a ray traced through it: refracted entering the front, again leaving the
-  // back, then on to the sheet. Near the middle the rays barely bend, so the
-  // text reads upright and a little magnified, "inside" the ball. Toward the
-  // rim they bend so hard they cross, so the same text comes back flipped,
-  // stretched and wrapped around the edge. One continuous image, no overlay,
-  // and the ball itself is never drawn. Open the page with ?tune for sliders.
-  const LENS = {
-    strength: 1.0,      // refraction strength (glass index 1 + 0.25 × strength)
-    edge: 1.0,          // edge distortion: 1 = physical, more = exaggerated rim
-    magnification: 1.9, // center magnification (sets how far behind the sheet is)
-    squareness: 6,      // how closely the rim hugs the screen's edges (2 = round)
-    anisotropy: 0.15,   // how uneven the bend is around the circle
-  };
-
-  function refract3(I, N, eta) {
-    const d = I[0] * N[0] + I[1] * N[1] + I[2] * N[2];
-    const k = 1 - eta * eta * (1 - d * d);
-    if (k < 0) return null;
-    const f = eta * d + Math.sqrt(k);
-    return [eta * I[0] - f * N[0], eta * I[1] - f * N[1], eta * I[2] - f * N[2]];
-  }
-  // Where a straight-on ray entering the unit ball at (x, 0) lands on the sheet
-  // at z = -depth. Mirrors the shader's trace().
-  function ballTrace(x, ior, depth) {
-    const P1 = [x, 0, Math.sqrt(Math.max(1 - x * x, 0))];
-    const T1 = refract3([0, 0, -1], P1, 1 / ior);
-    const t = -2 * (P1[0] * T1[0] + P1[1] * T1[1] + P1[2] * T1[2]);
-    const s1 = (-depth - P1[2]) / T1[2];
-    if (s1 <= t) return P1[0] + s1 * T1[0];
-    const P2 = [P1[0] + t * T1[0], P1[1] + t * T1[1], P1[2] + t * T1[2]];
-    const T2 = refract3(T1, [-P2[0], -P2[1], -P2[2]], ior);
-    const s2 = (-depth - P2[2]) / T2[2];
-    return P2[0] + s2 * T2[0];
-  }
-  // Sheet depth that gives the wanted centre magnification for this glass.
-  function solveDepth(ior, mag) {
-    // Apparent magnification: screen distance over the sheet distance it shows.
-    const m = d => 1e-3 / ballTrace(1e-3, ior, d);
-    const focal = ior / (2 * (ior - 1));
-    let lo = 0, hi = focal - 0.02;
-    if (mag <= m(lo)) return { depth: lo, mag: m(lo) };
-    if (mag >= m(hi)) return { depth: hi, mag: m(hi) };
-    for (let i = 0; i < 40; i++) {
-      const mid = (lo + hi) / 2;
-      if (m(mid) < mag) lo = mid; else hi = mid;
-    }
-    return { depth: lo, mag: m(lo) };
-  }
-
-  // --- Input + motion (shared by both renderers) --------------------------
-  const target = { x: 0, y: 0 };
-  let lastInput = -Infinity;
-
-  function setPointer(clientX, clientY) {
-    target.x = (clientX / window.innerWidth) * 2 - 1;
-    target.y = (clientY / window.innerHeight) * 2 - 1;
-    lastInput = performance.now();
-  }
-  window.addEventListener('pointermove', e => setPointer(e.clientX, e.clientY));
-  window.addEventListener('pointerdown', e => setPointer(e.clientX, e.clientY));
-  window.addEventListener('touchmove', e => {
-    const p = e.touches[0];
-    if (p) setPointer(p.clientX, p.clientY);
-  }, { passive: true });
-
-  // Phone tilt also steers it (iOS asks for permission on first tap).
-  function onTilt(e) {
-    if (e.gamma == null) return;
-    target.x = Math.max(-1, Math.min(1, e.gamma / 35));
-    target.y = Math.max(-1, Math.min(1, (e.beta - 40) / 35));
-    lastInput = performance.now();
-  }
-  const DOE = window.DeviceOrientationEvent;
-  if (DOE && typeof DOE.requestPermission === 'function') {
-    window.addEventListener('pointerup', function ask() {
-      DOE.requestPermission().then(s => {
-        if (s === 'granted') window.addEventListener('deviceorientation', onTilt);
-      }).catch(() => {});
-      window.removeEventListener('pointerup', ask);
-    });
-  } else if (DOE) {
-    window.addEventListener('deviceorientation', onTilt);
-  }
-
-  const canvas = document.getElementById('gl');
-  const svg = document.getElementById('svg');
-  const gl = params.has('svg') ? null :
-    canvas.getContext('webgl', { antialias: true, premultipliedAlpha: false });
-  const draw = gl ? webglRenderer() : svgRenderer();
-
-  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  // Two chained exponential smoothers: no overshoot, no jitter.
-  const s = { ax: 0, ay: 0, x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0 };
-  let prev = performance.now();
-
-  function frame(now) {
-    const dt = Math.min((now - prev) / 1000, 0.05);
-    prev = now;
-    // Without input for a while the swell wanders in a lazy figure-eight.
-    let tx = target.x, ty = target.y;
-    if (now - lastInput > 2500 && !reduce) {
-      const k = now / 1000;
-      tx = Math.sin(k * 0.7) * 0.55;
-      ty = Math.sin(k * 1.1) * 0.35;
-    }
-
-    const k = 1 - Math.exp(-dt * (reduce ? 1.5 : 2.6));
-    s.ax += (tx - s.ax) * k;
-    s.ay += (ty - s.ay) * k;
-    s.x += (s.ax - s.x) * k;
-    s.y += (s.ay - s.y) * k;
-
-    // Speed in units per second, smoothed, so the look doesn't depend on frame rate.
-    const kv = 1 - Math.exp(-dt * 6);
-    s.vx += ((s.x - s.px) / Math.max(dt, 1e-3) - s.vx) * kv;
-    s.vy += ((s.y - s.py) / Math.max(dt, 1e-3) - s.vy) * kv;
-    s.px = s.x; s.py = s.y;
-
-
-    const phase = reduce ? 0 : now / 1000 * GLASS.drift;
-    draw(s.x, s.y, s.vx, s.vy, phase);
-    requestAnimationFrame(frame);
-  }
-
-  // ?gif: no live loop; window.__renderAt(t) draws one frame of a seamless
-  // loop (t in 0..1) and returns it as a PNG data URL. The field's drift goes
-  // once around its circle per loop, so the last frame meets the first.
-  if (params.has('gif') && gl) {
-    window.__renderAt = (t, period = 4) => {
-      const w = 2 * Math.PI / period, a = t * 2 * Math.PI;
-      const x = Math.sin(a) * 0.55, y = Math.sin(2 * a) * 0.35;
-      draw(x, y, Math.cos(a) * 0.55 * w, Math.cos(2 * a) * 0.7 * w, a);
-      return canvas.toDataURL('image/png');
-    };
-  } else {
-    requestAnimationFrame(frame);
-  }
-
-  // ?tune: sliders for the lens, values shown so they can be copied into LENS.
-  if (params.has('tune')) {
-    const ranges = {
-      strength: [0.2, 2.5, 0.01], edge: [0, 2, 0.01], magnification: [1, 4, 0.01],
-      squareness: [2, 12, 0.1], anisotropy: [0, 0.8, 0.01],
-    };
-    const box = document.createElement('div');
-    box.style.cssText = 'position:fixed;left:12px;bottom:12px;padding:10px 12px;background:#fff;' +
-      'border:1px solid #000;font:12px/1.6 ' + FONT + ';color:#000;z-index:9;touch-action:auto';
-    for (const [key, [min, max, step]] of Object.entries(ranges)) {
-      const row = document.createElement('label');
-      row.style.cssText = 'display:grid;grid-template-columns:96px 140px 40px;gap:8px;align-items:center';
-      const input = Object.assign(document.createElement('input'), { type: 'range', min, max, step, value: LENS[key] });
-      const out = document.createElement('span');
-      out.textContent = LENS[key];
-      input.addEventListener('input', () => { LENS[key] = +input.value; out.textContent = input.value; });
-      input.addEventListener('pointermove', e => e.stopPropagation());
-      row.append(key, input, out);
-      box.append(row);
-    }
-    document.body.append(box);
-  }
-
-  // --- WebGL renderer ------------------------------------------------------
-  function webglRenderer() {
-    const tex = document.createElement('canvas');
-    tex.width = tex.height = TEX;
-    const t = tex.getContext('2d');
-
-    function drawTexture() {
-      t.fillStyle = RED_CSS;
-      t.fillRect(0, 0, TEX, TEX);
-      t.fillStyle = '#000';
-      t.textAlign = 'center';
-      t.textBaseline = 'middle';
-      for (const [txt, size, weight, y, spacing] of LINES) {
-        t.font = `${weight} ${size}px ${FONT}`;
-        if ('letterSpacing' in t) t.letterSpacing = spacing + 'px';
-        t.fillText(txt, TEX / 2, y);
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>maria turns 30</title>
+    <meta
+      name="description"
+      content="maria turns 30 — beautifully bizarre. sat, dec 05 · 19:00 · NOMER"
+    />
+    <meta name="theme-color" content="#e8191c" />
+    <style>
+      :root {
+        --red: #e8191c;
+        --ink: #000;
+        --bg: #e8191c;
       }
-    }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        height: 100%;
+        background: var(--bg);
+        overflow: hidden;
+        overscroll-behavior: none;
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      }
+      body {
+        display: grid;
+        place-items: center;
+        touch-action: none;
+        cursor: default;
+      }
+      /* The sphere is stretched edge to edge: an ellipse inscribed in the viewport. */
+      .ball {
+        position: fixed;
+        inset: 0;
+      }
+      canvas,
+      svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      svg {
+        display: none;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="ball" id="ball">
+      <canvas id="gl" aria-hidden="true"></canvas>
+      <svg
+        id="svg"
+        viewBox="0 0 1000 1000"
+        preserveAspectRatio="xMidYMid slice"
+        aria-hidden="true"
+      ></svg>
+      <div class="sr-only">
+        <h1>maria turns 30</h1>
+        <p>
+          theme of the night:
+          <a
+            href="https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/"
+            target="_blank"
+            rel="noopener"
+            >beautifully bizarre</a
+          >
+        </p>
+        <p>sat, dec 05 · 19:00</p>
+        <p>
+          <a
+            href="https://yandex.ru/maps/-/CXR7QBIn"
+            target="_blank"
+            rel="noopener"
+            >NOMER</a
+          >
+        </p>
+      </div>
+    </main>
 
-    const vs = `
+    <script>
+      (() => {
+        const RED = [232 / 255, 25 / 255, 28 / 255];
+        const RED_CSS = `rgb(${RED.map((c) => Math.round(c * 255)).join(",")})`;
+        const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
+        const params = new URLSearchParams(location.search);
+
+        // The invitation in texture pixels (TEX × TEX): text, size, weight, y,
+        // letter spacing, and an optional link.
+        const TEX = 1024;
+        const LINES = [
+          ["maria turns 30", 118, 700, 270, -3],
+          ["THEME OF THE NIGHT", 40, 400, 410, 4],
+          [
+            "beautifully bizarre",
+            92,
+            700,
+            490,
+            -2,
+            "https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/",
+          ],
+          ["sat, dec 05 · 19:00", 64, 400, 640, 0],
+          ["NOMER", 88, 700, 750, 1, "https://yandex.ru/maps/-/CXR7QBIn"],
+        ];
+        // Clickable boxes of the linked lines, in texture pixels (filled when drawn).
+        const LINKS = [];
+        // Texture units per disc radius: the texture centre sits at the disc centre.
+        const S = 0.7;
+
+        // --- Invisible glass ------------------------------------------------------
+        // An unseen sheet of uneven glass: its thickness is a smooth, low-frequency
+        // noise field, and the image is shifted along the thickness gradient, the way
+        // light bends through it. Nothing of the glass itself is drawn.
+        const GLASS = {
+          freq: 1.1, // size of the thickness swells (lower = broader)
+          amount: 0.42, // thickness of the drifting field
+          cursor: 0.22, // extra swell that follows the pointer
+          cursorSize: 0.32, // its spread (radius² in disc units)
+          strength: 0.15, // how far a thickness slope shifts the image
+          chroma: 0.07, // RGB split, only where refraction is strong
+          drift: 0.05, // how fast the field slowly flows on its own (rad/s)
+          calm: 0.1, // share of the distortion left in the readable centre
+          edge0: 0.48, // where the distortion starts to build toward the rim
+          rim: 0.8, // outward bend at the very rim: pulls in mirrored copies
+          rimPow: 2.2, // > 2 keeps the start of that bend imperceptible
+          parallax: 0.12, // how much the view angle follows the pointer
+        };
+        // Outward image shift (disc units) at radius r: zero in the centre, growing
+        // smoothly toward the rim, where the image wraps into mirrored reflections.
+        function rimShift(r) {
+          const b = Math.min(
+            Math.max((r - GLASS.edge0) / (1 - GLASS.edge0), 0),
+            1,
+          );
+          return GLASS.rim * Math.pow(b, GLASS.rimPow);
+        }
+
+        // --- Glass ball lens --------------------------------------------------------
+        // The invitation is a flat sheet behind a solid glass ball, and every pixel
+        // is a ray traced through it: refracted entering the front, again leaving the
+        // back, then on to the sheet. Near the middle the rays barely bend, so the
+        // text reads upright and a little magnified, "inside" the ball. Toward the
+        // rim they bend so hard they cross, so the same text comes back flipped,
+        // stretched and wrapped around the edge. One continuous image, no overlay,
+        // and the ball itself is never drawn. Open the page with ?tune for sliders.
+        const LENS = {
+          strength: 1.0, // refraction strength (glass index 1 + 0.25 × strength)
+          edge: 1.0, // edge distortion: 1 = physical, more = exaggerated rim
+          magnification: 1.9, // center magnification (sets how far behind the sheet is)
+          squareness: 6, // how closely the rim hugs the screen's edges (2 = round)
+          anisotropy: 0.15, // how uneven the bend is around the circle
+        };
+
+        function refract3(I, N, eta) {
+          const d = I[0] * N[0] + I[1] * N[1] + I[2] * N[2];
+          const k = 1 - eta * eta * (1 - d * d);
+          if (k < 0) return null;
+          const f = eta * d + Math.sqrt(k);
+          return [
+            eta * I[0] - f * N[0],
+            eta * I[1] - f * N[1],
+            eta * I[2] - f * N[2],
+          ];
+        }
+        // Where a straight-on ray entering the unit ball at (x, 0) lands on the sheet
+        // at z = -depth. Mirrors the shader's trace().
+        function ballTrace(x, ior, depth) {
+          const P1 = [x, 0, Math.sqrt(Math.max(1 - x * x, 0))];
+          const T1 = refract3([0, 0, -1], P1, 1 / ior);
+          const t = -2 * (P1[0] * T1[0] + P1[1] * T1[1] + P1[2] * T1[2]);
+          const s1 = (-depth - P1[2]) / T1[2];
+          if (s1 <= t) return P1[0] + s1 * T1[0];
+          const P2 = [P1[0] + t * T1[0], P1[1] + t * T1[1], P1[2] + t * T1[2]];
+          const T2 = refract3(T1, [-P2[0], -P2[1], -P2[2]], ior);
+          const s2 = (-depth - P2[2]) / T2[2];
+          return P2[0] + s2 * T2[0];
+        }
+        // Sheet depth that gives the wanted centre magnification for this glass.
+        function solveDepth(ior, mag) {
+          // Apparent magnification: screen distance over the sheet distance it shows.
+          const m = (d) => 1e-3 / ballTrace(1e-3, ior, d);
+          const focal = ior / (2 * (ior - 1));
+          let lo = 0,
+            hi = focal - 0.02;
+          if (mag <= m(lo)) return { depth: lo, mag: m(lo) };
+          if (mag >= m(hi)) return { depth: hi, mag: m(hi) };
+          for (let i = 0; i < 40; i++) {
+            const mid = (lo + hi) / 2;
+            if (m(mid) < mag) lo = mid;
+            else hi = mid;
+          }
+          return { depth: lo, mag: m(lo) };
+        }
+
+        // --- Input + motion (shared by both renderers) --------------------------
+        const target = { x: 0, y: 0 };
+        let lastInput = -Infinity;
+
+        function setPointer(clientX, clientY) {
+          target.x = (clientX / window.innerWidth) * 2 - 1;
+          target.y = (clientY / window.innerHeight) * 2 - 1;
+          lastInput = performance.now();
+        }
+        window.addEventListener("pointermove", (e) =>
+          setPointer(e.clientX, e.clientY),
+        );
+        window.addEventListener("pointerdown", (e) =>
+          setPointer(e.clientX, e.clientY),
+        );
+        window.addEventListener(
+          "touchmove",
+          (e) => {
+            const p = e.touches[0];
+            if (p) setPointer(p.clientX, p.clientY);
+          },
+          { passive: true },
+        );
+
+        // Phone tilt also steers it (iOS asks for permission on first tap).
+        function onTilt(e) {
+          if (e.gamma == null) return;
+          target.x = Math.max(-1, Math.min(1, e.gamma / 35));
+          target.y = Math.max(-1, Math.min(1, (e.beta - 40) / 35));
+          lastInput = performance.now();
+        }
+        const DOE = window.DeviceOrientationEvent;
+        if (DOE && typeof DOE.requestPermission === "function") {
+          window.addEventListener("pointerup", function ask() {
+            DOE.requestPermission()
+              .then((s) => {
+                if (s === "granted")
+                  window.addEventListener("deviceorientation", onTilt);
+              })
+              .catch(() => {});
+            window.removeEventListener("pointerup", ask);
+          });
+        } else if (DOE) {
+          window.addEventListener("deviceorientation", onTilt);
+        }
+
+        const canvas = document.getElementById("gl");
+        const svg = document.getElementById("svg");
+        const gl = params.has("svg")
+          ? null
+          : canvas.getContext("webgl", {
+              antialias: true,
+              premultipliedAlpha: false,
+            });
+        const draw = gl ? webglRenderer() : svgRenderer();
+
+        // Links live in the refracted image, so clicks are mapped through the lens
+        // to the line actually drawn under the pointer.
+        if (draw.pick) {
+          canvas.addEventListener("pointermove", (e) => {
+            canvas.style.cursor = draw.pick(e.clientX, e.clientY)
+              ? "pointer"
+              : "";
+          });
+          canvas.addEventListener("click", (e) => {
+            const link = draw.pick(e.clientX, e.clientY);
+            if (link) window.open(link.url, "_blank", "noopener");
+          });
+        }
+
+        const reduce = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+        // Two chained exponential smoothers: no overshoot, no jitter.
+        const s = { ax: 0, ay: 0, x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0 };
+        let prev = performance.now();
+
+        function frame(now) {
+          const dt = Math.min((now - prev) / 1000, 0.05);
+          prev = now;
+          // Without input for a while the swell wanders in a lazy figure-eight.
+          let tx = target.x,
+            ty = target.y;
+          if (now - lastInput > 2500 && !reduce) {
+            const k = now / 1000;
+            tx = Math.sin(k * 0.7) * 0.55;
+            ty = Math.sin(k * 1.1) * 0.35;
+          }
+
+          const k = 1 - Math.exp(-dt * (reduce ? 1.5 : 2.6));
+          s.ax += (tx - s.ax) * k;
+          s.ay += (ty - s.ay) * k;
+          s.x += (s.ax - s.x) * k;
+          s.y += (s.ay - s.y) * k;
+
+          // Speed in units per second, smoothed, so the look doesn't depend on frame rate.
+          const kv = 1 - Math.exp(-dt * 6);
+          s.vx += ((s.x - s.px) / Math.max(dt, 1e-3) - s.vx) * kv;
+          s.vy += ((s.y - s.py) / Math.max(dt, 1e-3) - s.vy) * kv;
+          s.px = s.x;
+          s.py = s.y;
+
+          const phase = reduce ? 0 : (now / 1000) * GLASS.drift;
+          draw(s.x, s.y, s.vx, s.vy, phase);
+          requestAnimationFrame(frame);
+        }
+
+        // ?gif: no live loop; window.__renderAt(t) draws one frame of a seamless
+        // loop (t in 0..1) and returns it as a PNG data URL. The field's drift goes
+        // once around its circle per loop, so the last frame meets the first.
+        if (params.has("gif") && gl) {
+          window.__renderAt = (t, period = 4) => {
+            const w = (2 * Math.PI) / period,
+              a = t * 2 * Math.PI;
+            const x = Math.sin(a) * 0.55,
+              y = Math.sin(2 * a) * 0.35;
+            draw(x, y, Math.cos(a) * 0.55 * w, Math.cos(2 * a) * 0.7 * w, a);
+            return canvas.toDataURL("image/png");
+          };
+        } else {
+          requestAnimationFrame(frame);
+        }
+
+        // ?tune: sliders for the lens, values shown so they can be copied into LENS.
+        if (params.has("tune")) {
+          const ranges = {
+            strength: [0.2, 2.5, 0.01],
+            edge: [0, 2, 0.01],
+            magnification: [1, 4, 0.01],
+            squareness: [2, 12, 0.1],
+            anisotropy: [0, 0.8, 0.01],
+          };
+          const box = document.createElement("div");
+          box.style.cssText =
+            "position:fixed;left:12px;bottom:12px;padding:10px 12px;background:#fff;" +
+            "border:1px solid #000;font:12px/1.6 " +
+            FONT +
+            ";color:#000;z-index:9;touch-action:auto";
+          for (const [key, [min, max, step]] of Object.entries(ranges)) {
+            const row = document.createElement("label");
+            row.style.cssText =
+              "display:grid;grid-template-columns:96px 140px 40px;gap:8px;align-items:center";
+            const input = Object.assign(document.createElement("input"), {
+              type: "range",
+              min,
+              max,
+              step,
+              value: LENS[key],
+            });
+            const out = document.createElement("span");
+            out.textContent = LENS[key];
+            input.addEventListener("input", () => {
+              LENS[key] = +input.value;
+              out.textContent = input.value;
+            });
+            input.addEventListener("pointermove", (e) => e.stopPropagation());
+            row.append(key, input, out);
+            box.append(row);
+          }
+          document.body.append(box);
+        }
+
+        // --- WebGL renderer ------------------------------------------------------
+        function webglRenderer() {
+          const tex = document.createElement("canvas");
+          tex.width = tex.height = TEX;
+          const t = tex.getContext("2d");
+
+          function drawTexture() {
+            t.fillStyle = RED_CSS;
+            t.fillRect(0, 0, TEX, TEX);
+            t.fillStyle = "#000";
+            t.textAlign = "center";
+            t.textBaseline = "middle";
+            LINKS.length = 0;
+            for (const [txt, size, weight, y, spacing, url] of LINES) {
+              t.font = `${weight} ${size}px ${FONT}`;
+              if ("letterSpacing" in t) t.letterSpacing = spacing + "px";
+              t.fillText(txt, TEX / 2, y);
+              if (url) {
+                const w = t.measureText(txt).width,
+                  pad = size * 0.25;
+                LINKS.push({
+                  url,
+                  x0: TEX / 2 - w / 2 - pad,
+                  x1: TEX / 2 + w / 2 + pad,
+                  y0: y - size * 0.7,
+                  y1: y + size * 0.7,
+                });
+              }
+            }
+          }
+
+          const vs = `
       attribute vec2 p;
       varying vec2 uv;
       void main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }
     `;
-    const fs = `
+          const fs = `
       precision highp float;
       varying vec2 uv;
       uniform sampler2D tex;
@@ -309,7 +425,7 @@
 
       const float S = ${S.toFixed(3)};
       const float CHROMA = ${(GLASS.chroma * 0.5).toFixed(4)};
-      const vec3 RED = vec3(${RED.map(c => c.toFixed(4)).join(', ')});
+      const vec3 RED = vec3(${RED.map((c) => c.toFixed(4)).join(", ")});
 
       // Ray through the unit ball: enters at (q, z) on the front, refracts,
       // either meets the sheet inside (shallow sheet) or leaves through the
@@ -375,148 +491,308 @@
       }
     `;
 
-    function compile(type, src) {
-      const sh = gl.createShader(type);
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(sh);
-      return sh;
-    }
-    const prog = gl.createProgram();
-    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
-    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
-    gl.linkProgram(prog);
-    gl.useProgram(prog);
+          function compile(type, src) {
+            const sh = gl.createShader(type);
+            gl.shaderSource(sh, src);
+            gl.compileShader(sh);
+            if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+              throw gl.getShaderInfoLog(sh);
+            return sh;
+          }
+          const prog = gl.createProgram();
+          gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+          gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+          gl.linkProgram(prog);
+          gl.useProgram(prog);
 
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    const loc = gl.getAttribLocation(prog, 'p');
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+          const buf = gl.createBuffer();
+          gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+          gl.bufferData(
+            gl.ARRAY_BUFFER,
+            new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+            gl.STATIC_DRAW,
+          );
+          const loc = gl.getAttribLocation(prog, "p");
+          gl.enableVertexAttribArray(loc);
+          gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    // Mirrored wrap, so a shift past the invitation's edge never shows a seam.
-    const texture = gl.createTexture();
-    function uploadTexture() {
-      drawTexture();
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tex);
-      gl.generateMipmap(gl.TEXTURE_2D);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
-    }
-    uploadTexture();
-    if (document.fonts) document.fonts.ready.then(uploadTexture);
+          // Mirrored wrap, so a shift past the invitation's edge never shows a seam.
+          const texture = gl.createTexture();
+          function uploadTexture() {
+            drawTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              tex,
+            );
+            gl.generateMipmap(gl.TEXTURE_2D);
+            gl.texParameteri(
+              gl.TEXTURE_2D,
+              gl.TEXTURE_MIN_FILTER,
+              gl.LINEAR_MIPMAP_LINEAR,
+            );
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(
+              gl.TEXTURE_2D,
+              gl.TEXTURE_WRAP_S,
+              gl.MIRRORED_REPEAT,
+            );
+            gl.texParameteri(
+              gl.TEXTURE_2D,
+              gl.TEXTURE_WRAP_T,
+              gl.MIRRORED_REPEAT,
+            );
+          }
+          uploadTexture();
+          if (document.fonts) document.fonts.ready.then(uploadTexture);
 
-    const U = {};
-    for (const name of ['tilt', 'ior', 'depth', 'mag', 'lEdge', 'lAniso',
-      'lTurn', 'rimPow', 'halfPx', 'unit']) U[name] = gl.getUniformLocation(prog, name);
+          const U = {};
+          for (const name of [
+            "tilt",
+            "ior",
+            "depth",
+            "mag",
+            "lEdge",
+            "lAniso",
+            "lTurn",
+            "rimPow",
+            "halfPx",
+            "unit",
+          ])
+            U[name] = gl.getUniformLocation(prog, name);
 
-    function resize() {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const cw = canvas.clientWidth, ch = canvas.clientHeight;
-      const w = Math.round(cw * dpr), h = Math.round(ch * dpr);
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-        gl.viewport(0, 0, w, h);
-        gl.uniform2f(U.halfPx, cw / 2, ch / 2);
-        // Text scales with the screen's short side, as it did in the ball.
-        gl.uniform1f(U.unit, 0.44 * Math.min(cw, ch));
-      }
-    }
-    window.addEventListener('resize', resize);
-    resize();
+          function resize() {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const cw = canvas.clientWidth,
+              ch = canvas.clientHeight;
+            const w = Math.round(cw * dpr),
+              h = Math.round(ch * dpr);
+            if (canvas.width !== w || canvas.height !== h) {
+              canvas.width = w;
+              canvas.height = h;
+              gl.viewport(0, 0, w, h);
+              gl.uniform2f(U.halfPx, cw / 2, ch / 2);
+              // Text scales with the screen's short side, as it did in the ball.
+              gl.uniform1f(U.unit, 0.44 * Math.min(cw, ch));
+            }
+          }
+          window.addEventListener("resize", resize);
+          resize();
 
-    let solved = null, solvedKey = '';
-    return (x, y) => {
-      const ior = 1 + 0.25 * Math.max(LENS.strength, 0.01);
-      const key = ior + '|' + LENS.magnification;
-      if (key !== solvedKey) { solved = solveDepth(ior, LENS.magnification); solvedKey = key; }
-      // Looking at the ball from the pointer's side: the text slides and
-      // bends inside it, the flipped rim copies swing the other way.
-      gl.uniform2f(U.tilt, x * GLASS.parallax, -y * GLASS.parallax);
-      gl.uniform1f(U.ior, ior);
-      gl.uniform1f(U.depth, solved.depth);
-      gl.uniform1f(U.mag, solved.mag);
-      gl.uniform1f(U.lEdge, LENS.edge);
-      gl.uniform1f(U.rimPow, Math.max(LENS.squareness, 1));
-      gl.uniform1f(U.lAniso, LENS.anisotropy);
-      gl.uniform1f(U.lTurn, x * 0.35);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    };
-  }
+          let solved = null,
+            solvedKey = "";
+          const view = { x: 0, y: 0 };
+          function solveLens() {
+            const ior = 1 + 0.25 * Math.max(LENS.strength, 0.01);
+            const key = ior + "|" + LENS.magnification;
+            if (key !== solvedKey) {
+              solved = solveDepth(ior, LENS.magnification);
+              solvedKey = key;
+            }
+            return ior;
+          }
 
-  // --- SVG fallback (no WebGL) ----------------------------------------------
-  // The same idea baked into one displacement map for feDisplacementMap: a calm
-  // centre, an outward bend toward the rim and a few smooth, uneven waves that
-  // grow with it. One pass per colour channel keeps the faint RGB split.
-  function svgRenderer() {
-    canvas.style.display = 'none';
-    svg.style.display = 'block';
+          // The shader's ray, in JS, to find which sheet point a screen point shows.
+          function traceJS(qx, qy, I, n, depth) {
+            const nz = Math.sqrt(Math.max(1 - qx * qx - qy * qy, 0));
+            const P1 = [qx, qy, nz];
+            const T1 = refract3(I, P1, 1 / n) || [0, 0, -1];
+            const t = -2 * (P1[0] * T1[0] + P1[1] * T1[1] + P1[2] * T1[2]);
+            const s1 = (-depth - P1[2]) / Math.min(T1[2], -1e-4);
+            if (s1 <= t) return [P1[0] + s1 * T1[0], P1[1] + s1 * T1[1]];
+            const P2 = [
+              P1[0] + t * T1[0],
+              P1[1] + t * T1[1],
+              P1[2] + t * T1[2],
+            ];
+            const N2 = [-P2[0], -P2[1], -P2[2]];
+            let T2 = refract3(T1, N2, n);
+            if (!T2) {
+              const d = T1[0] * N2[0] + T1[1] * N2[1] + T1[2] * N2[2];
+              T2 = [
+                T1[0] - 2 * d * N2[0],
+                T1[1] - 2 * d * N2[1],
+                T1[2] - 2 * d * N2[2],
+              ];
+            }
+            const s2 = (-depth - P2[2]) / Math.min(T2[2], -1e-4);
+            return [P2[0] + s2 * T2[0], P2[1] + s2 * T2[1]];
+          }
+          const sstep = (x) => {
+            const t = Math.min(Math.max(x, 0), 1);
+            return t * t * (3 - 2 * t);
+          };
 
-    const N = 256;
-    const dx = new Float32Array(N * N), dy = new Float32Array(N * N);
-    let max = 1e-6;
-    for (let j = 0; j < N; j++) {
-      for (let i = 0; i < N; i++) {
-        const x = (i + 0.5) / N * 2 - 1, y = (j + 0.5) / N * 2 - 1;
-        const r = Math.hypot(x, y);
-        let vx = 0, vy = 0;
-        if (r < 1) {
-          const rim = rimShift(r) / Math.max(r, 1e-4);
-          const t = Math.min(Math.max((r - GLASS.edge0) / (0.9 - GLASS.edge0), 0), 1);
-          const w = GLASS.calm + (1 - GLASS.calm) * t * t * (3 - 2 * t);
-          vx = x * rim + w * 0.06 * (Math.sin(2.3 * y + 1.1) + 0.6 * Math.sin(4.1 * x - 3.7 * y));
-          vy = y * rim + w * 0.06 * (Math.sin(2.7 * x - 0.4) + 0.6 * Math.sin(3.3 * y + 4.4 * x));
+          // Screen point (client px) → the link drawn there, mirroring main() in the
+          // shader for the green channel.
+          function pick(clientX, clientY) {
+            solveLens();
+            const rect = canvas.getBoundingClientRect();
+            const hx = rect.width / 2,
+              hy = rect.height / 2,
+              minA = Math.min(hx, hy);
+            const Px = clientX - rect.left - hx,
+              Py = -(clientY - rect.top - hy);
+            const sx = Math.abs(Px / hx),
+              sy = Math.abs(Py / hy),
+              pw = Math.max(LENS.squareness, 1);
+            const sq = Math.pow(Math.pow(sx, pw) + Math.pow(sy, pw), 1 / pw);
+            const len = Math.hypot(Px, Py),
+              e = len / minA;
+            const u = e + (sq - e) * sstep(sq);
+            const rv = Math.min(0.97 * u, 0.97 + 0.012 * sstep((u - 1) / 0.25));
+            const dx = len > 1e-4 ? Px / len : 1,
+              dy = len > 1e-4 ? Py / len : 0;
+            const qx = dx * rv,
+              qy = dy * rv;
+            const ior = 1 + 0.25 * Math.max(LENS.strength, 0.01);
+            const tx = view.x * GLASS.parallax,
+              ty = -view.y * GLASS.parallax;
+            const il = Math.hypot(tx, ty, 1),
+              I = [tx / il, ty / il, -1 / il];
+            const c0 = traceJS(0, 0, I, ior, solved.depth);
+            const th = Math.atan2(Py, Px) + view.x * 0.35;
+            const A =
+              1 +
+              LENS.anisotropy *
+                (0.6 * Math.cos(2 * th + 0.7) + 0.4 * Math.cos(3 * th - 1.2));
+            const parx = c0[0] + qx / solved.mag,
+              pary = c0[1] + qy / solved.mag;
+            const h = traceJS(qx, qy, I, ior, solved.depth);
+            const k =
+              ((minA / 0.97) * solved.mag) /
+              (0.44 * Math.min(rect.width, rect.height));
+            const px = (parx + (h[0] - parx) * LENS.edge * A) * k;
+            const py = (pary + (h[1] - pary) * LENS.edge * A) * k;
+            const X = (0.5 + px * S) * TEX,
+              Y = (0.5 - py * S) * TEX;
+            return (
+              LINKS.find(
+                (l) => X >= l.x0 && X <= l.x1 && Y >= l.y0 && Y <= l.y1,
+              ) || null
+            );
+          }
+
+          const draw = (x, y) => {
+            view.x = x;
+            view.y = y;
+            const ior = solveLens();
+            // Looking at the ball from the pointer's side: the text slides and
+            // bends inside it, the flipped rim copies swing the other way.
+            gl.uniform2f(U.tilt, x * GLASS.parallax, -y * GLASS.parallax);
+            gl.uniform1f(U.ior, ior);
+            gl.uniform1f(U.depth, solved.depth);
+            gl.uniform1f(U.mag, solved.mag);
+            gl.uniform1f(U.lEdge, LENS.edge);
+            gl.uniform1f(U.rimPow, Math.max(LENS.squareness, 1));
+            gl.uniform1f(U.lAniso, LENS.anisotropy);
+            gl.uniform1f(U.lTurn, x * 0.35);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          };
+          draw.pick = pick;
+          return draw;
         }
-        dx[j * N + i] = vx; dy[j * N + i] = vy;
-        max = Math.max(max, Math.abs(vx), Math.abs(vy));
-      }
-    }
-    const map = document.createElement('canvas');
-    map.width = map.height = N;
-    const mc = map.getContext('2d');
-    const img = mc.createImageData(N, N);
-    for (let p = 0; p < N * N; p++) {
-      img.data[p * 4] = Math.round(128 + 127 * dx[p] / max);
-      img.data[p * 4 + 1] = Math.round(128 + 127 * dy[p] / max);
-      img.data[p * 4 + 2] = 128;
-      img.data[p * 4 + 3] = 255;
-    }
-    mc.putImageData(img, 0, 0);
 
-    // feDisplacementMap shifts by scale × (channel − 0.5); the radius is 500.
-    const scale = max * 500 * 2;
-    const k = [1 + GLASS.chroma, 1, 1 - GLASS.chroma];
-    const keep = ['1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0',
-                  '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0',
-                  '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0'];
-    const passes = [0, 1, 2].map(c => `
+        // --- SVG fallback (no WebGL) ----------------------------------------------
+        // The same idea baked into one displacement map for feDisplacementMap: a calm
+        // centre, an outward bend toward the rim and a few smooth, uneven waves that
+        // grow with it. One pass per colour channel keeps the faint RGB split.
+        function svgRenderer() {
+          canvas.style.display = "none";
+          svg.style.display = "block";
+
+          const N = 256;
+          const dx = new Float32Array(N * N),
+            dy = new Float32Array(N * N);
+          let max = 1e-6;
+          for (let j = 0; j < N; j++) {
+            for (let i = 0; i < N; i++) {
+              const x = ((i + 0.5) / N) * 2 - 1,
+                y = ((j + 0.5) / N) * 2 - 1;
+              const r = Math.hypot(x, y);
+              let vx = 0,
+                vy = 0;
+              if (r < 1) {
+                const rim = rimShift(r) / Math.max(r, 1e-4);
+                const t = Math.min(
+                  Math.max((r - GLASS.edge0) / (0.9 - GLASS.edge0), 0),
+                  1,
+                );
+                const w = GLASS.calm + (1 - GLASS.calm) * t * t * (3 - 2 * t);
+                vx =
+                  x * rim +
+                  w *
+                    0.06 *
+                    (Math.sin(2.3 * y + 1.1) +
+                      0.6 * Math.sin(4.1 * x - 3.7 * y));
+                vy =
+                  y * rim +
+                  w *
+                    0.06 *
+                    (Math.sin(2.7 * x - 0.4) +
+                      0.6 * Math.sin(3.3 * y + 4.4 * x));
+              }
+              dx[j * N + i] = vx;
+              dy[j * N + i] = vy;
+              max = Math.max(max, Math.abs(vx), Math.abs(vy));
+            }
+          }
+          const map = document.createElement("canvas");
+          map.width = map.height = N;
+          const mc = map.getContext("2d");
+          const img = mc.createImageData(N, N);
+          for (let p = 0; p < N * N; p++) {
+            img.data[p * 4] = Math.round(128 + (127 * dx[p]) / max);
+            img.data[p * 4 + 1] = Math.round(128 + (127 * dy[p]) / max);
+            img.data[p * 4 + 2] = 128;
+            img.data[p * 4 + 3] = 255;
+          }
+          mc.putImageData(img, 0, 0);
+
+          // feDisplacementMap shifts by scale × (channel − 0.5); the radius is 500.
+          const scale = max * 500 * 2;
+          const k = [1 + GLASS.chroma, 1, 1 - GLASS.chroma];
+          const keep = [
+            "1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0",
+            "0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0",
+            "0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0",
+          ];
+          const passes = [0, 1, 2]
+            .map(
+              (c) => `
       <feDisplacementMap in="SourceGraphic" in2="field" scale="${(scale * k[c]).toFixed(1)}"
         xChannelSelector="R" yChannelSelector="G" result="d${c}"/>
-      <feColorMatrix in="d${c}" type="matrix" values="${keep[c]}" result="c${c}"/>`).join('');
+      <feColorMatrix in="d${c}" type="matrix" values="${keep[c]}" result="c${c}"/>`,
+            )
+            .join("");
 
-    // Same layout as the WebGL texture: texture pixels mapped onto the disc.
-    const texToSvg = 500 / (S * TEX);
-    const text = LINES.map(([txt, size, weight, y, spacing]) =>
-      `<text x="${TEX / 2}" y="${y}" font-size="${size}" font-weight="${weight}"
-        letter-spacing="${spacing}" text-anchor="middle" dominant-baseline="middle">${txt}</text>`
-    ).join('');
+          // Same layout as the WebGL texture: texture pixels mapped onto the disc.
+          const texToSvg = 500 / (S * TEX);
+          const textFor = (linked) =>
+            LINES.map(([txt, size, weight, y, spacing, url]) => {
+              const el = `<text x="${TEX / 2}" y="${y}" font-size="${size}" font-weight="${weight}"
+        letter-spacing="${spacing}" text-anchor="middle" dominant-baseline="middle">${txt}</text>`;
+              return linked && url
+                ? `<a href="${url}" target="_blank" rel="noopener">${el}</a>`
+                : el;
+            }).join("");
 
-    // A 3×3 mirrored tiling, like the WebGL texture's mirrored wrap, so the
-    // rim has something to reflect.
-    let tiles = '';
-    for (let ty = -1; ty <= 1; ty++) {
-      for (let tx = -1; tx <= 1; tx++) {
-        const sx = tx ? -1 : 1, sy = ty ? -1 : 1;
-        tiles += `<g transform="translate(${TEX / 2 + tx * TEX} ${TEX / 2 + ty * TEX}) scale(${sx} ${sy}) translate(${-TEX / 2} ${-TEX / 2})">${text}</g>`;
-      }
-    }
+          // A 3×3 mirrored tiling, like the WebGL texture's mirrored wrap, so the
+          // rim has something to reflect.
+          let tiles = "";
+          for (let ty = -1; ty <= 1; ty++) {
+            for (let tx = -1; tx <= 1; tx++) {
+              const sx = tx ? -1 : 1,
+                sy = ty ? -1 : 1;
+              tiles += `<g transform="translate(${TEX / 2 + tx * TEX} ${TEX / 2 + ty * TEX}) scale(${sx} ${sy}) translate(${-TEX / 2} ${-TEX / 2})">${textFor(!tx && !ty)}</g>`;
+            }
+          }
 
-    svg.innerHTML = `
+          svg.innerHTML = `
       <defs>
         <filter id="glass" filterUnits="userSpaceOnUse" x="0" y="0" width="1000" height="1000"
           color-interpolation-filters="sRGB">
@@ -538,13 +814,16 @@
         </g>
       </g>`;
 
-    // Moving the text under a fixed field makes the bends travel across it.
-    const inv = svg.getElementById('inv');
-    return (x, y) => {
-      inv.setAttribute('transform', `translate(${(-x * 40).toFixed(1)} ${(-y * 30).toFixed(1)})`);
-    };
-  }
-})();
-</script>
-</body>
+          // Moving the text under a fixed field makes the bends travel across it.
+          const inv = svg.getElementById("inv");
+          return (x, y) => {
+            inv.setAttribute(
+              "transform",
+              `translate(${(-x * 40).toFixed(1)} ${(-y * 30).toFixed(1)})`,
+            );
+          };
+        }
+      })();
+    </script>
+  </body>
 </html>
