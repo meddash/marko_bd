@@ -278,16 +278,19 @@
     s.vx += ((s.x - s.px) / Math.max(dt, 1e-3) - s.vx) * kv;
     s.vy += ((s.y - s.py) / Math.max(dt, 1e-3) - s.vy) * kv;
     s.px = s.x; s.py = s.y;
-    const vx = s.vx, vy = s.vy;
 
-
-    // The disc itself drifts toward the pointer and tilts slightly with speed.
+    // The disc itself drifts toward the pointer.
     const travel = Math.min(window.innerWidth, window.innerHeight) * 0.06;
     ball.style.transform =
       `translate(${s.x * travel}px, ${s.y * travel}px)`;
 
-    gl.uniform2f(U.off, -s.x * 0.12, s.y * 0.1);
-    gl.uniform1f(U.phi, s.x * 0.9 + s.y * 0.45);
+    draw(s.x, s.y, s.vx, s.vy);
+    requestAnimationFrame(frame);
+  }
+
+  function draw(x, y, vx, vy) {
+    gl.uniform2f(U.off, -x * 0.12, y * 0.1);
+    gl.uniform1f(U.phi, x * 0.9 + y * 0.45);
     const speed = Math.hypot(vx, vy);
     gl.uniform1f(U.spread, reduce ? 0.04 : Math.min(0.06 + speed * 0.12, 0.35));
     // Cap the smear so fast jumps stay readable.
@@ -296,9 +299,20 @@
     if (bl > maxBlur) { bx *= maxBlur / bl; by *= maxBlur / bl; }
     gl.uniform2f(U.blur, reduce ? 0 : bx, reduce ? 0 : by);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  // ?gif: no live loop; window.__renderAt(t) draws one frame of a seamless
+  // figure-eight loop (t in 0..1) and returns it as a PNG data URL.
+  if (new URLSearchParams(location.search).has('gif')) {
+    window.__renderAt = (t, period = 4) => {
+      const w = 2 * Math.PI / period, a = t * 2 * Math.PI;
+      const x = Math.sin(a) * 0.55, y = Math.sin(2 * a) * 0.35;
+      draw(x, y, Math.cos(a) * 0.55 * w, Math.cos(2 * a) * 0.7 * w);
+      return canvas.toDataURL('image/png');
+    };
+  } else {
     requestAnimationFrame(frame);
   }
-  requestAnimationFrame(frame);
 
   // Static version if WebGL is unavailable.
   function fallback() {
