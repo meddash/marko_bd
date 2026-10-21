@@ -81,7 +81,7 @@
             >beautifully bizarre</a
           >
         </p>
-        <p>sat, dec 05 · 19:00</p>
+        <p><a id="cal-link">sat, dec 05 · 19:00</a></p>
         <p>
           <a
             href="https://yandex.ru/maps/-/CXR7QBIn"
@@ -100,6 +100,43 @@
         const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
         const params = new URLSearchParams(location.search);
 
+        // Calendar event for the date: an .ics file, which phones and desktops
+        // open straight into their calendar. Moscow time (UTC+3), written in UTC.
+        const ICS = [
+          "BEGIN:VCALENDAR",
+          "VERSION:2.0",
+          "PRODID:-//maria-turns-30//RU",
+          "CALSCALE:GREGORIAN",
+          "BEGIN:VEVENT",
+          "UID:maria-turns-30-20261205@nomer",
+          "DTSTAMP:20261021T000000Z",
+          "DTSTART:20261205T160000Z",
+          "DTEND:20261205T220000Z",
+          "SUMMARY:Марии 30 лет",
+          "LOCATION:NOMER",
+          "DESCRIPTION:Theme of the night: beautifully bizarre\\nhttps://yandex.ru/maps/-/CXR7QBIn",
+          "URL:https://yandex.ru/maps/-/CXR7QBIn",
+          "END:VEVENT",
+          "END:VCALENDAR",
+        ].join("\r\n");
+        const ICS_URL =
+          "data:text/calendar;charset=utf-8," + encodeURIComponent(ICS);
+        const ICS_NAME = "maria-turns-30.ics";
+
+        function openLink(url) {
+          if (url === ICS_URL) {
+            const a = Object.assign(document.createElement("a"), {
+              href: url,
+              download: ICS_NAME,
+            });
+            document.body.append(a);
+            a.click();
+            a.remove();
+          } else {
+            window.open(url, "_blank", "noopener");
+          }
+        }
+
         // The invitation in texture pixels (TEX × TEX): text, size, weight, y,
         // letter spacing, and an optional link.
         const TEX = 1024;
@@ -114,7 +151,7 @@
             -2,
             "https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/",
           ],
-          ["sat, dec 05 · 19:00", 64, 400, 640, 0],
+          ["sat, dec 05 · 19:00", 64, 400, 640, 0, ICS_URL],
           ["NOMER", 88, 700, 750, 1, "https://yandex.ru/maps/-/CXR7QBIn"],
         ];
         // Clickable boxes of the linked lines, in texture pixels (filled when drawn).
@@ -262,6 +299,10 @@
               premultipliedAlpha: false,
             });
         const draw = gl ? webglRenderer() : svgRenderer();
+        Object.assign(document.getElementById("cal-link"), {
+          href: ICS_URL,
+          download: ICS_NAME,
+        });
 
         // Links live in the refracted image, so clicks are mapped through the lens
         // to the line actually drawn under the pointer.
@@ -273,7 +314,7 @@
           });
           canvas.addEventListener("click", (e) => {
             const link = draw.pick(e.clientX, e.clientY);
-            if (link) window.open(link.url, "_blank", "noopener");
+            if (link) openLink(link.url);
           });
         }
 
@@ -776,9 +817,10 @@
             LINES.map(([txt, size, weight, y, spacing, url]) => {
               const el = `<text x="${TEX / 2}" y="${y}" font-size="${size}" font-weight="${weight}"
         letter-spacing="${spacing}" text-anchor="middle" dominant-baseline="middle">${txt}</text>`;
-              return linked && url
-                ? `<a href="${url}" target="_blank" rel="noopener">${el}</a>`
-                : el;
+              if (!linked || !url) return el;
+              return url === ICS_URL
+                ? `<a href="${url}" download="${ICS_NAME}">${el}</a>`
+                : `<a href="${url}" target="_blank" rel="noopener">${el}</a>`;
             }).join("");
 
           // A 3×3 mirrored tiling, like the WebGL texture's mirrored wrap, so the
