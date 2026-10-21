@@ -71,7 +71,7 @@
         aria-hidden="true"
       ></svg>
       <div class="sr-only">
-        <h1>maria turns 30</h1>
+        <h1>MARIA TURNS 30</h1>
         <p>
           theme of the night:
           <a
@@ -86,16 +86,16 @@
             href="https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/"
             target="_blank"
             rel="noopener"
-            >dc: surrealist cocktail — коктейльный образ + одна weird detail.
+            >dc: surrealist cocktail — коктейльный образ + одна weird detail
           </a>
         </p>
-        <p><a id="cal-link">sat, dec 05 · 19:00</a></p>
+        <p><a href="maria-turns-30.ics">sat, dec 05 · 19:00</a></p>
         <p>
           <a
             href="https://yandex.ru/maps/-/CXR7QBIn"
             target="_blank"
             rel="noopener"
-            >NOMER</a
+            >nomer</a
           >
         </p>
       </div>
@@ -108,41 +108,15 @@
         const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
         const params = new URLSearchParams(location.search);
 
-        // Calendar event for the date: an .ics file, which phones and desktops
-        // open straight into their calendar. Moscow time (UTC+3), written in UTC.
-        const ICS = [
-          "BEGIN:VCALENDAR",
-          "VERSION:2.0",
-          "PRODID:-//maria-turns-30//RU",
-          "CALSCALE:GREGORIAN",
-          "BEGIN:VEVENT",
-          "UID:maria-turns-30-20261205@nomer",
-          "DTSTAMP:20261021T000000Z",
-          "DTSTART:20261205T160000Z",
-          "DTEND:20261205T220000Z",
-          "SUMMARY:Марии 30 лет",
-          "LOCATION:NOMER",
-          "DESCRIPTION:Theme of the night: beautifully bizarre\\nhttps://yandex.ru/maps/-/CXR7QBIn",
-          "URL:https://yandex.ru/maps/-/CXR7QBIn",
-          "END:VEVENT",
-          "END:VCALENDAR",
-        ].join("\r\n");
-        const ICS_URL =
-          "data:text/calendar;charset=utf-8," + encodeURIComponent(ICS);
-        const ICS_NAME = "maria-turns-30.ics";
+        // Calendar event for the date: a real .ics file next to the page.
+        // Opening it (same tab) makes iOS show "Add to Calendar" and Android /
+        // desktops hand it to the calendar app. A data: URL would be blocked on
+        // iPhone, so the file has to be served as a file.
+        const ICS_URL = "maria-turns-30.ics";
 
         function openLink(url) {
-          if (url === ICS_URL) {
-            const a = Object.assign(document.createElement("a"), {
-              href: url,
-              download: ICS_NAME,
-            });
-            document.body.append(a);
-            a.click();
-            a.remove();
-          } else {
-            window.open(url, "_blank", "noopener");
-          }
+          if (url === ICS_URL) location.href = url;
+          else window.open(url, "_blank", "noopener");
         }
 
         // The invitation in texture pixels (TEX × TEX): text, size, weight, y,
@@ -151,13 +125,13 @@
         const PINTEREST =
           "https://ru.pinterest.com/mashadyakonova/beautifully-bizarre/";
         const LINES = [
-          ["maria turns 30", 118, 700, 230, -3],
-          ["THEME OF THE NIGHT", 40, 400, 360, 4],
+          ["MARIA TURNS 30", 96, 700, 230, -2],
+          ["theme of the night", 42, 400, 360, 0.5],
           ["beautifully bizarre", 92, 700, 435, -2, PINTEREST],
           // Dress code: a small label line, then the brief in one quiet line.
           ["dc: surrealist cocktail", 46, 700, 538, -0.5, PINTEREST],
           [
-            "коктейльный образ + одна weird detail.",
+            "коктейльный образ + одна weird detail",
             30,
             400,
             590,
@@ -165,7 +139,7 @@
             PINTEREST,
           ],
           ["sat, dec 05 · 19:00", 64, 400, 685, 0, ICS_URL],
-          ["NOMER", 88, 700, 785, 1, "https://yandex.ru/maps/-/CXR7QBIn"],
+          ["nomer", 88, 700, 785, 0, "https://yandex.ru/maps/-/CXR7QBIn"],
         ];
         // Clickable boxes of the linked lines, in texture pixels (filled when drawn).
         const LINKS = [];
@@ -312,10 +286,6 @@
               premultipliedAlpha: false,
             });
         const draw = gl ? webglRenderer() : svgRenderer();
-        Object.assign(document.getElementById("cal-link"), {
-          href: ICS_URL,
-          download: ICS_NAME,
-        });
 
         // Links live in the refracted image, so clicks are mapped through the lens
         // to the line actually drawn under the pointer.
@@ -891,7 +861,7 @@
         letter-spacing="${spacing}" text-anchor="middle" dominant-baseline="middle">${txt}</text>`;
               if (!linked || !url) return el;
               return url === ICS_URL
-                ? `<a href="${url}" download="${ICS_NAME}">${el}</a>`
+                ? `<a href="${url}">${el}</a>`
                 : `<a href="${url}" target="_blank" rel="noopener">${el}</a>`;
             }).join("");
 
