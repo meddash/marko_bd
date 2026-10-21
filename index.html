@@ -32,13 +32,13 @@
     aspect-ratio: 1;
     will-change: transform;
   }
-  canvas {
+  canvas, svg {
     display: block;
     width: 100%;
     height: 100%;
     border-radius: 50%;
-    background: var(--red);
   }
+  svg { display: none; }
   .sr-only {
     position: absolute;
     width: 1px; height: 1px;
@@ -51,6 +51,7 @@
 <body>
   <main class="ball" id="ball">
     <canvas id="gl" aria-hidden="true"></canvas>
+    <svg id="svg" viewBox="0 0 1000 1000" aria-hidden="true"></svg>
     <div class="sr-only">
       <h1>maria turns 30</h1>
       <p>theme of the night: beautifully bizarre</p>
@@ -62,158 +63,61 @@
 <script>
 (() => {
   const RED = [232 / 255, 25 / 255, 28 / 255];
+  const RED_CSS = `rgb(${RED.map(c => Math.round(c * 255)).join(',')})`;
   const FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif';
+  const params = new URLSearchParams(location.search);
 
-  // --- Text texture -------------------------------------------------------
-  // The invitation is drawn flat onto a square canvas, then sampled by the lens shader.
+  // The invitation in texture pixels (TEX × TEX): text, size, weight, y, letter spacing.
   const TEX = 1024;
-  const tex = document.createElement('canvas');
-  tex.width = tex.height = TEX;
-  const t = tex.getContext('2d');
+  const LINES = [
+    ['maria turns 30', 118, 700, 270, -3],
+    ['THEME OF THE NIGHT', 40, 400, 410, 4],
+    ['beautifully bizarre', 92, 700, 490, -2],
+    ['sat, dec 05 · 19:00', 64, 400, 640, 0],
+    ['NOMER', 88, 700, 750, 1],
+  ];
+  // Texture units per ball radius: the texture centre sits at the ball centre.
+  const S = 0.66;
 
-  function drawTexture() {
-    t.fillStyle = `rgb(${RED.map(c => c * 255).join(',')})`;
-    t.fillRect(0, 0, TEX, TEX);
-    t.fillStyle = '#000';
-    t.textAlign = 'center';
-    t.textBaseline = 'middle';
-    const cx = TEX / 2;
-    const line = (txt, size, weight, y, spacing = 0) => {
-      t.font = `${weight} ${size}px ${FONT}`;
-      if ('letterSpacing' in t) t.letterSpacing = spacing + 'px';
-      t.fillText(txt, cx, y);
-    };
-    line('maria turns 30', 118, 700, 270, -3);
-    line('THEME OF THE NIGHT', 40, 400, 410, 4);
-    line('beautifully bizarre', 92, 700, 490, -2);
-    line('sat, dec 05 · 19:00', 64, 400, 640);
-    line('NOMER', 88, 700, 750, 1);
-  }
-
-  // --- WebGL --------------------------------------------------------------
-  const canvas = document.getElementById('gl');
-  const gl = canvas.getContext('webgl', { antialias: true, premultipliedAlpha: false });
-  if (!gl) { fallback(); return; }
-
-  const vs = `
-    attribute vec2 p;
-    varying vec2 uv;
-    void main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }
-  `;
-  // Text sealed inside a mirrored glass ball:
-  //  - the core shows the invitation flat, slightly magnified like through glass;
-  //  - toward the rim the inside surface reflects it: polar-mapped, mirrored,
-  //    wrapped around the circumference and smeared along it.
-  const fs = `
-    precision highp float;
-    varying vec2 uv;
-    uniform sampler2D tex;
-    uniform vec2 off;     // parallax of the inner text
-    uniform float phi;    // rotation of the reflections around the rim
-    uniform vec2 blur;    // motion smear of the inner text
-    uniform float spread; // angular smear of the reflections
-    uniform vec3 red;
-
-    const float S = 0.6;  // texture units per ball radius
-
-    float ink(vec2 p) {
-      vec4 c = texture2D(tex, vec2(0.5 + p.x * S, 0.5 - p.y * S));
-      return clamp(1.0 - c.r / red.r, 0.0, 1.0);
-    }
-
-    void main() {
-      vec2 q = uv;
-      float r = length(q);
-      if (r > 1.0) { gl_FragColor = vec4(red, 0.0); return; }
-
-      // Inner text: gentle fisheye, magnified in the middle.
-      vec2 m = q * (0.84 + 0.32 * r * r) + off;
-      float a = 0.0;
-      for (int i = 0; i < 5; i++) {
-        float k = float(i) / 4.0 - 0.5;
-        a += ink(m + blur * k);
-      }
-      a /= 5.0;
-      float wm = 1.0 - smoothstep(0.66, 0.84, r);
-
-      // Reflection: the closer to the rim, the deeper into the text it looks,
-      // so the same lines curl around the edge, mirrored.
-      float t = clamp((r - 0.66) / 0.34, 0.0, 1.0);
-      float rr = mix(0.5, 0.16, t);
-      float ang = atan(q.y, q.x) + phi;
-      float b = 0.0;
-      for (int j = 0; j < 7; j++) {
-        float aj = ang + (float(j) / 6.0 - 0.5) * spread;
-        vec2 d = vec2(-cos(aj), sin(aj)) * rr - off * 1.6;
-        b += ink(d);
-      }
-      b /= 7.0;
-      float wr = smoothstep(0.66, 0.86, r) * 0.88;
-
-      float v = max(a * wm, b * wr);
-      vec3 col = mix(red, vec3(0.0), v);
-      col *= 1.0 - 0.14 * smoothstep(0.82, 1.0, r); // darker glass edge
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `;
-
-  function compile(type, src) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src);
-    gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);
-    return s;
-  }
-  const prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
-  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
-  gl.linkProgram(prog);
-  gl.useProgram(prog);
-
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-  const loc = gl.getAttribLocation(prog, 'p');
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-
-  const texture = gl.createTexture();
-  function uploadTexture() {
-    drawTexture();
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tex);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
-  }
-  uploadTexture();
-  if (document.fonts) document.fonts.ready.then(uploadTexture);
-
-  const U = {
-    off: gl.getUniformLocation(prog, 'off'),
-    phi: gl.getUniformLocation(prog, 'phi'),
-    blur: gl.getUniformLocation(prog, 'blur'),
-    spread: gl.getUniformLocation(prog, 'spread'),
-    red: gl.getUniformLocation(prog, 'red'),
+  // --- Glass profile -------------------------------------------------------
+  // Like the bottom of a heavy tumbler: nearly flat in the middle, then the
+  // glass thickens and curves ever more steeply toward the rim, with faint
+  // moulded rings on the slope. Height is in ball-radius units.
+  const GLASS = {
+    dome: 0.16,       // gentle convex lens over the whole face
+    rimStart: 0.5,    // where the bevel begins (no distortion inside it)
+    rim: 0.6,         // bevel height at the edge
+    rimPow: 2.4,      // > 2 keeps the start of the bevel perfectly smooth
+    ring: 0.006,      // ripple amplitude
+    ringFreq: 44,
+    depth: 2.2,       // optical thickness: how far refraction shifts the image
+    ior: [1.44, 1.47, 1.51], // R, G, B — the spread is the chromatic aberration
   };
-  gl.uniform3fv(U.red, RED);
 
-  function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.round(canvas.clientWidth * dpr);
-    if (canvas.width !== w) {
-      canvas.width = canvas.height = w;
-      gl.viewport(0, 0, w, w);
-    }
+  function glassHeight(r) {
+    const b = Math.min(Math.max((r - GLASS.rimStart) / (1 - GLASS.rimStart), 0), 1);
+    const w = smooth(0.66, 0.8, r) * (1 - smooth(0.9, 0.97, r));
+    return GLASS.dome * (1 - r * r) + GLASS.rim * Math.pow(b, GLASS.rimPow) +
+      GLASS.ring * Math.sin(r * GLASS.ringFreq) * w;
   }
-  window.addEventListener('resize', resize);
-  resize();
+  function smooth(a, b, x) {
+    const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
+    return t * t * (3 - 2 * t);
+  }
+  // Radial image shift (outward, in radius units) for a ray looking straight in.
+  function glassShift(r, ior) {
+    const e = 1e-3;
+    const slope = (glassHeight(r + e) - glassHeight(r - e)) / (2 * e);
+    const nx = -slope / Math.hypot(slope, 1), nz = 1 / Math.hypot(slope, 1);
+    const eta = 1 / ior, c1 = nz;
+    const k = 1 - eta * eta * (1 - c1 * c1);
+    if (k < 0) return 0;
+    const f = eta * c1 - Math.sqrt(k);
+    const tx = f * nx, tz = -eta + f * nz;
+    return (tx / -tz) * (glassHeight(r) + 0.2) * GLASS.depth;
+  }
 
-  // --- Input --------------------------------------------------------------
-  // Pointer position normalised to [-1, 1] relative to the viewport centre.
+  // --- Input + motion (shared by both renderers) --------------------------
   const target = { x: 0, y: 0 };
   let lastInput = -Infinity;
 
@@ -229,7 +133,7 @@
     if (p) setPointer(p.clientX, p.clientY);
   }, { passive: true });
 
-  // Phone tilt also steers the ball (iOS asks for permission on first tap).
+  // Phone tilt also steers the glass (iOS asks for permission on first tap).
   function onTilt(e) {
     if (e.gamma == null) return;
     target.x = Math.max(-1, Math.min(1, e.gamma / 35));
@@ -248,7 +152,12 @@
     window.addEventListener('deviceorientation', onTilt);
   }
 
-  // --- Animation ----------------------------------------------------------
+  const canvas = document.getElementById('gl');
+  const svg = document.getElementById('svg');
+  const gl = params.has('svg') ? null :
+    canvas.getContext('webgl', { antialias: true, premultipliedAlpha: false });
+  const draw = gl ? webglRenderer() : svgRenderer();
+
   const ball = document.getElementById('ball');
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Two chained exponential smoothers: no overshoot, no jitter.
@@ -258,7 +167,7 @@
   function frame(now) {
     const dt = Math.min((now - prev) / 1000, 0.05);
     prev = now;
-    // Without input for a while the ball idles in a lazy figure-eight.
+    // Without input for a while the glass idles in a lazy figure-eight.
     let tx = target.x, ty = target.y;
     if (now - lastInput > 2500 && !reduce) {
       const k = now / 1000;
@@ -272,38 +181,23 @@
     s.x += (s.ax - s.x) * k;
     s.y += (s.ay - s.y) * k;
 
-    // Per-frame velocity, itself smoothed so blur and tilt don't flicker.
+    // Speed in units per second, smoothed, so the look doesn't depend on frame rate.
     const kv = 1 - Math.exp(-dt * 6);
-    // Speed in units per second, so the look doesn't depend on frame rate.
     s.vx += ((s.x - s.px) / Math.max(dt, 1e-3) - s.vx) * kv;
     s.vy += ((s.y - s.py) / Math.max(dt, 1e-3) - s.vy) * kv;
     s.px = s.x; s.py = s.y;
 
     // The disc itself drifts toward the pointer.
     const travel = Math.min(window.innerWidth, window.innerHeight) * 0.06;
-    ball.style.transform =
-      `translate(${s.x * travel}px, ${s.y * travel}px)`;
+    ball.style.transform = `translate(${s.x * travel}px, ${s.y * travel}px)`;
 
     draw(s.x, s.y, s.vx, s.vy);
     requestAnimationFrame(frame);
   }
 
-  function draw(x, y, vx, vy) {
-    gl.uniform2f(U.off, -x * 0.12, y * 0.1);
-    gl.uniform1f(U.phi, x * 0.9 + y * 0.45);
-    const speed = Math.hypot(vx, vy);
-    gl.uniform1f(U.spread, reduce ? 0.04 : Math.min(0.06 + speed * 0.12, 0.35));
-    // Cap the smear so fast jumps stay readable.
-    let bx = -vx * 0.06, by = vy * 0.06;
-    const bl = Math.hypot(bx, by), maxBlur = 0.03;
-    if (bl > maxBlur) { bx *= maxBlur / bl; by *= maxBlur / bl; }
-    gl.uniform2f(U.blur, reduce ? 0 : bx, reduce ? 0 : by);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  }
-
   // ?gif: no live loop; window.__renderAt(t) draws one frame of a seamless
   // figure-eight loop (t in 0..1) and returns it as a PNG data URL.
-  if (new URLSearchParams(location.search).has('gif')) {
+  if (params.has('gif') && gl) {
     window.__renderAt = (t, period = 4) => {
       const w = 2 * Math.PI / period, a = t * 2 * Math.PI;
       const x = Math.sin(a) * 0.55, y = Math.sin(2 * a) * 0.35;
@@ -314,12 +208,264 @@
     requestAnimationFrame(frame);
   }
 
-  // Static version if WebGL is unavailable.
-  function fallback() {
-    drawTexture();
-    const ctx = canvas.getContext('2d');
-    canvas.width = canvas.height = TEX;
-    ctx.drawImage(tex, 0, 0);
+  // --- WebGL renderer ------------------------------------------------------
+  function webglRenderer() {
+    const tex = document.createElement('canvas');
+    tex.width = tex.height = TEX;
+    const t = tex.getContext('2d');
+
+    function drawTexture() {
+      t.fillStyle = RED_CSS;
+      t.fillRect(0, 0, TEX, TEX);
+      t.fillStyle = '#000';
+      t.textAlign = 'center';
+      t.textBaseline = 'middle';
+      for (const [txt, size, weight, y, spacing] of LINES) {
+        t.font = `${weight} ${size}px ${FONT}`;
+        if ('letterSpacing' in t) t.letterSpacing = spacing + 'px';
+        t.fillText(txt, TEX / 2, y);
+      }
+    }
+
+    const vs = `
+      attribute vec2 p;
+      varying vec2 uv;
+      void main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }
+    `;
+    // A ray from the eye hits the glass surface, refracts by Snell's law and
+    // travels through the glass's thickness before reaching the invitation
+    // underneath. Its sideways travel is the UV displacement. Each colour
+    // channel refracts with its own index, which splits RGB where the glass
+    // is steep. Nothing is blurred or tinted: the glass is clear.
+    const fs = `
+      precision highp float;
+      varying vec2 uv;
+      uniform sampler2D tex;
+      uniform vec2 tilt;   // viewing angle, from the pointer
+      uniform vec2 off;    // parallax of the invitation under the glass
+      uniform vec3 light;  // direction to the light, for highlights
+      uniform float px;    // one pixel in ball-radius units
+      uniform vec3 ior;
+
+      const float S = ${S.toFixed(3)};
+      const float DOME = ${GLASS.dome.toFixed(3)};
+      const float RIM0 = ${GLASS.rimStart.toFixed(3)};
+      const float RIM = ${GLASS.rim.toFixed(3)};
+      const float RIMPOW = ${GLASS.rimPow.toFixed(3)};
+      const float RING = ${GLASS.ring.toFixed(4)};
+      const float RINGF = ${GLASS.ringFreq.toFixed(1)};
+      const float DEPTH = ${GLASS.depth.toFixed(3)};
+
+      float height(vec2 q) {
+        float r = length(q);
+        float b = clamp((r - RIM0) / (1.0 - RIM0), 0.0, 1.0);
+        float w = smoothstep(0.66, 0.8, r) * (1.0 - smoothstep(0.9, 0.97, r));
+        return DOME * (1.0 - r * r) + RIM * pow(b, RIMPOW) + RING * sin(r * RINGF) * w;
+      }
+
+      vec3 normalAt(vec2 q) {
+        float e = 0.0015;
+        vec2 g = vec2(
+          height(q + vec2(e, 0.0)) - height(q - vec2(e, 0.0)),
+          height(q + vec2(0.0, e)) - height(q - vec2(0.0, e))
+        ) / (2.0 * e);
+        return normalize(vec3(-g, 1.0));
+      }
+
+      vec2 shift(vec3 n, vec3 I, float eta, float thick) {
+        vec3 T = refract(I, n, eta);
+        if (T.z > -0.05) T.z = -0.05; // grazing: keep it finite
+        return T.xy / -T.z * thick * DEPTH;
+      }
+
+      vec4 sampleAt(vec2 p) {
+        return texture2D(tex, vec2(0.5 + p.x * S, 0.5 - p.y * S));
+      }
+
+      void main() {
+        vec2 q = uv;
+        float r = length(q);
+        float alpha = 1.0 - smoothstep(1.0 - 1.5 * px, 1.0, r);
+        if (alpha <= 0.0) { gl_FragColor = vec4(0.0); return; }
+
+        vec3 n = normalAt(q);
+        vec3 I = normalize(vec3(tilt, -1.0));
+        float thick = height(q) + 0.2;
+        vec2 base = q + off;
+
+        vec3 col;
+        col.r = sampleAt(base + shift(n, I, 1.0 / ior.r, thick)).r;
+        col.g = sampleAt(base + shift(n, I, 1.0 / ior.g, thick)).g;
+        col.b = sampleAt(base + shift(n, I, 1.0 / ior.b, thick)).b;
+
+        // Highlights: a tight specular glint, a broad soft sheen, and a faint
+        // Fresnel reflection where the glass turns away from the eye.
+        vec3 V = vec3(0.0, 0.0, 1.0);
+        vec3 H = normalize(light + V);
+        float nh = max(dot(n, H), 0.0);
+        float glint = pow(nh, 140.0) * 0.55;
+        float sheen = pow(nh, 18.0) * 0.08;
+        float fres = pow(1.0 - max(n.z, 0.0), 3.0) * 0.10;
+        float edge = smoothstep(0.955, 0.99, r) * (1.0 - smoothstep(0.99, 1.0, r)) * 0.18;
+        col += vec3(glint + sheen + fres + edge);
+
+        gl_FragColor = vec4(min(col, 1.0), alpha);
+      }
+    `;
+
+    function compile(type, src) {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(sh);
+      return sh;
+    }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'p');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    // Mirrored wrap: where the rim bends rays past the invitation's edge, the
+    // glass shows it reflected back, the way a thick tumbler base does.
+    const texture = gl.createTexture();
+    function uploadTexture() {
+      drawTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tex);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+    }
+    uploadTexture();
+    if (document.fonts) document.fonts.ready.then(uploadTexture);
+
+    const U = {};
+    for (const name of ['tilt', 'off', 'light', 'px', 'ior']) U[name] = gl.getUniformLocation(prog, name);
+    gl.uniform3fv(U.ior, GLASS.ior);
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.round(canvas.clientWidth * dpr);
+      if (canvas.width !== w) {
+        canvas.width = canvas.height = w;
+        gl.viewport(0, 0, w, w);
+        gl.uniform1f(U.px, 2 / w);
+      }
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    return (x, y, vx, vy) => {
+      // The glass lags its own motion a touch, so it feels heavy.
+      gl.uniform2f(U.tilt, (x + vx * 0.04) * 0.28, -(y + vy * 0.04) * 0.28);
+      gl.uniform2f(U.off, -x * 0.06, y * 0.05);
+      const L = [-0.45 + x * 0.5, 0.55 - y * 0.5, 1];
+      const l = Math.hypot(...L);
+      gl.uniform3f(U.light, L[0] / l, L[1] / l, L[2] / l);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    };
+  }
+
+  // --- SVG fallback (no WebGL) ----------------------------------------------
+  // The same glass profile baked into a displacement map for feDisplacementMap:
+  // one pass per colour channel with a slightly different strength, so the
+  // chromatic aberration survives too.
+  function svgRenderer() {
+    canvas.style.display = 'none';
+    svg.style.display = 'block';
+
+    const N = 256;
+    let maxShift = 0;
+    const shifts = new Float32Array(N * N);
+    const ang = new Float32Array(N * N);
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const qx = (i + 0.5) / N * 2 - 1, qy = (j + 0.5) / N * 2 - 1;
+        const r = Math.hypot(qx, qy);
+        const d = r < 1 ? glassShift(r, GLASS.ior[1]) : 0;
+        shifts[j * N + i] = d;
+        ang[j * N + i] = Math.atan2(qy, qx);
+        maxShift = Math.max(maxShift, Math.abs(d));
+      }
+    }
+    const map = document.createElement('canvas');
+    map.width = map.height = N;
+    const mc = map.getContext('2d');
+    const img = mc.createImageData(N, N);
+    for (let p = 0; p < N * N; p++) {
+      const d = shifts[p] / maxShift;
+      img.data[p * 4] = Math.round(128 + 127 * d * Math.cos(ang[p]));
+      img.data[p * 4 + 1] = Math.round(128 + 127 * d * Math.sin(ang[p]));
+      img.data[p * 4 + 2] = 128;
+      img.data[p * 4 + 3] = 255;
+    }
+    mc.putImageData(img, 0, 0);
+
+    // feDisplacementMap shifts by scale × (channel − 0.5); in SVG units the
+    // radius is 500.
+    const scale = maxShift * 500 * 2;
+    const k = GLASS.ior.map(n => (n - 1) / (GLASS.ior[1] - 1));
+    const keep = ['1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0',
+                  '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0',
+                  '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0'];
+    const passes = [0, 1, 2].map(c => `
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="${(scale * k[c]).toFixed(1)}"
+        xChannelSelector="R" yChannelSelector="G" result="d${c}"/>
+      <feColorMatrix in="d${c}" type="matrix" values="${keep[c]}" result="c${c}"/>`).join('');
+
+    // Same layout as the WebGL texture: texture pixels mapped onto the ball.
+    const texToSvg = 500 / (S * TEX);
+    const text = LINES.map(([txt, size, weight, y, spacing]) =>
+      `<text x="${TEX / 2}" y="${y}" font-size="${size}" font-weight="${weight}"
+        letter-spacing="${spacing}" text-anchor="middle" dominant-baseline="middle">${txt}</text>`
+    ).join('');
+
+    svg.innerHTML = `
+      <defs>
+        <clipPath id="disc"><circle cx="500" cy="500" r="500"/></clipPath>
+        <filter id="glass" filterUnits="userSpaceOnUse" x="0" y="0" width="1000" height="1000"
+          color-interpolation-filters="sRGB">
+          <feImage href="${map.toDataURL()}" x="0" y="0" width="1000" height="1000"
+            preserveAspectRatio="none" result="map"/>
+          ${passes}
+          <feComposite in="c0" in2="c1" operator="arithmetic" k2="1" k3="1" result="rg"/>
+          <feComposite in="rg" in2="c2" operator="arithmetic" k2="1" k3="1"/>
+        </filter>
+        <radialGradient id="glint">
+          <stop offset="0" stop-color="#fff" stop-opacity="0.55"/>
+          <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <g clip-path="url(#disc)">
+        <g filter="url(#glass)">
+          <rect x="-200" y="-200" width="1400" height="1400" fill="${RED_CSS}"/>
+          <g id="inv" font-family='${FONT}' fill="#000">
+            <g transform="translate(500 500) scale(${texToSvg.toFixed(4)}) translate(${-TEX / 2} ${-TEX / 2})">
+              ${text}
+            </g>
+          </g>
+        </g>
+        <ellipse id="hl" cx="300" cy="230" rx="120" ry="60" fill="url(#glint)"/>
+        <circle cx="500" cy="500" r="496" fill="none" stroke="#fff" stroke-opacity="0.16" stroke-width="8"/>
+      </g>`;
+
+    const inv = svg.getElementById('inv');
+    const hl = svg.getElementById('hl');
+    return (x, y) => {
+      inv.setAttribute('transform', `translate(${(-x * 0.06 * 500).toFixed(1)} ${(-y * 0.05 * 500).toFixed(1)})`);
+      hl.setAttribute('cx', (300 + x * 160).toFixed(1));
+      hl.setAttribute('cy', (230 + y * 120).toFixed(1));
+    };
   }
 })();
 </script>
